@@ -347,3 +347,31 @@ func TestExecutionSummary_ReportsLevelWithNoCalls(t *testing.T) {
 		t.Errorf("LEVEL_1 reported after LEVEL_2\n--- summary ---\n%s", summary)
 	}
 }
+
+// The plain rendering is what a call can actually deliver today, so it must
+// carry every field the SSML one does and contain no markup at all.
+func TestVoiceMessagePlain_CarriesEveryFieldAndNoMarkup(t *testing.T) {
+	trig := testTrigger("P1", ShiftLKMorning)
+	msg := trig.VoiceMessagePlain()
+
+	for _, want := range []string{"WSO2 Support Alert", "New Case", "P1", "Automation Test Account", "Americas CS Team - Integraion", "Work In Progress"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("plain message is missing %q\n  got: %s", want, msg)
+		}
+	}
+	for _, banned := range []string{"<", ">", "&"} {
+		if strings.Contains(msg, banned) {
+			t.Errorf("plain message contains markup character %q, which MakeCall would escape and speak aloud\n  got: %s", banned, msg)
+		}
+	}
+	// The case reference is spoken character by character.
+	if !strings.Contains(msg, "A U T O M A T I O N") {
+		t.Errorf("case reference is not spelled out\n  got: %s", msg)
+	}
+	// The elevation trigger asks for a comment instead of a status change.
+	elevated := trig
+	elevated.Kind = TriggerPriorityElevated
+	if !strings.Contains(elevated.VoiceMessagePlain(), "public comment") {
+		t.Errorf("elevation instruction missing\n  got: %s", elevated.VoiceMessagePlain())
+	}
+}

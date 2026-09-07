@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -186,6 +187,18 @@ func (p Plan) Delivered(at time.Time) []PlannedCall {
 
 // VoiceMessage renders the SSML the specification defines for the Twilio
 // alert, including the instruction that differs between the two triggers.
+//
+// IMPORTANT: this cannot be handed to notifications.TwilioClient.MakeCall as
+// it stands. That path builds its <Say> document by marshaling a typed struct,
+// so the message lands in chardata and every angle bracket here is escaped —
+// Twilio would read the markup aloud rather than interpret it. The escaping is
+// deliberate (it is what stops caller-supplied text injecting a different
+// TwiML verb) and must not be removed.
+//
+// Delivering this needs an SSML-aware call path in internal/notifications that
+// marshals the SSML elements as real nested XML structs, keeping injection
+// safety by construction instead of by escaping. Until that exists, use
+// VoiceMessagePlain.
 func (t Trigger) VoiceMessage() string {
 	instruction := "Add a public comment to stop further notifications."
 	if t.Kind == TriggerNewIncident {
@@ -276,4 +289,46 @@ func (p Plan) ExecutionSummary(cancelledAt *time.Time) []string {
 			cancelledAt.Format(stamp), len(p.Remaining(*cancelledAt))))
 	}
 	return lines
+}
+
+// VoiceMessagePlain renders the same alert as plain sentences, with no markup
+// at all. It carries exactly the information VoiceMessage does, minus the
+// pauses and prosody, and is safe to pass to MakeCall today: escaping plain
+// text changes nothing about how it is spoken.
+//
+// This is what a real call should use until an SSML-aware call path exists.
+func (t Trigger) VoiceMessagePlain() string {
+	instruction := "Add a public comment to stop further notifications."
+	if t.Kind == TriggerNewIncident {
+		instruction = "Update the ticket status to Work In Progress to stop further notifications."
+	}
+	// spacedRef reads an identifier out as separated characters, which is the
+	// plain-text stand-in for the SSML version's slowed prosody: a case id
+	// spoken at normal speed is the part listeners most often mishear.
+	return strings.Join([]string{
+		"WSO2 Support Alert.",
+		fmt.Sprintf("Trigger type, %s.", t.Kind),
+		fmt.Sprintf("Priority, %s.", t.Priority),
+		fmt.Sprintf("Account, %s.", t.Account),
+		fmt.Sprintf("Case number, %s.", spacedRef(t.WSO2CaseID)),
+		fmt.Sprintf("Team, %s.", t.Team),
+		instruction,
+	}, " ")
+}
+
+// spacedRef separates a reference's characters so a text-to-speech voice reads
+// it out character by character instead of trying to pronounce it as a word.
+func spacedRef(ref string) string {
+	var b strings.Builder
+	for i, r := range ref {
+		if i > 0 {
+			b.WriteByte(' ')
+		}
+		if r == '-' {
+			b.WriteString("dash")
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
 }
