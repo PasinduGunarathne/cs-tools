@@ -320,6 +320,13 @@ func (d *Dispatcher) Handle(ctx context.Context, record eventbus.Record) error {
 		return d.handleSeverityChanged(ctx, record, env.Payload)
 	case events.TypeIncidentCreated:
 		return d.handleIncidentCreated(ctx, record, env.EntityID, env.Payload)
+	case events.TypeIncidentAcknowledged, events.TypeIncidentPriorityElevated:
+		// The incident call-escalation ladder (internal/escalation) owns
+		// these; the notification dispatcher has no reaction to either. Same
+		// reasoning as the sla.* case below — erroring here would burn this
+		// consumer's retries and dead-letter a perfectly valid event that
+		// simply is not this consumer's concern.
+		return nil
 	case events.TypeSLAClockRegister, events.TypeSLATierReached:
 		// internal/slaengine's own consumer group (a different group ID, so
 		// it gets its own full copy of this same topic) is what reacts to

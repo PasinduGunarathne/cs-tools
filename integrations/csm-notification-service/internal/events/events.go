@@ -47,6 +47,14 @@ const (
 	TypeCaseAcknowledged Type = "case.acknowledged"
 	TypeSeverityChanged  Type = "case.severity_changed"
 	TypeIncidentCreated  Type = "incident.created"
+	// TypeIncidentAcknowledged / TypeIncidentPriorityElevated belong to the
+	// incident call-escalation ladder (internal/escalation), not to
+	// internal/dispatch. Published by entity-service's UpdateIncident. Both
+	// are in KnownTypes and have Validate cases so a malformed one is still
+	// rejected, but dispatch.Handle deliberately no-ops on them exactly as it
+	// does for the sla.* types — see that switch's own comment.
+	TypeIncidentAcknowledged     Type = "incident.acknowledged"
+	TypeIncidentPriorityElevated Type = "incident.priority_elevated"
 
 	// TypeSLAClockRegister and TypeSLATierReached belong to internal/slaengine,
 	// not internal/dispatch — see SLAClockRegisterPayload/SLATierReachedPayload
@@ -62,6 +70,7 @@ const (
 // that enumerate valid values.
 var KnownTypes = []Type{
 	TypeCaseCreated, TypeCommentAdded, TypeStatusChanged, TypeCaseAssigned, TypeCaseAcknowledged, TypeSeverityChanged, TypeIncidentCreated,
+	TypeIncidentAcknowledged, TypeIncidentPriorityElevated,
 	TypeSLAClockRegister, TypeSLATierReached,
 }
 
@@ -329,4 +338,40 @@ type SLATierReachedPayload struct {
 	CaseID    string `json:"caseId"`
 	ClockType string `json:"clockType"`
 	Tier      string `json:"tier"`
+}
+
+// IncidentAcknowledgedPayload is the Payload shape for
+// TypeIncidentAcknowledged — the signal that cancels a running call
+// escalation for an incident. Published by entity-service's UpdateIncident
+// when an incident genuinely leaves the NEW state, never on a no-op re-PATCH.
+//
+// Carries no Recipients and no acknowledger identity: nothing is sent to
+// anyone on acknowledgement (it only stops what is already running), and
+// entity-service has no actor to resolve — see its own payload doc comment.
+type IncidentAcknowledgedPayload struct {
+	// PreviousState is the state the incident left, e.g. "NEW".
+	PreviousState string `json:"previousState"`
+	// NewState is the state it moved to, e.g. "IN_PROGRESS". Included so a
+	// consumer can distinguish "picked up" from a terminal state
+	// (RESOLVED/CLOSED/CANCELLED) — both cancel the ladder, but they read
+	// differently in the execution summary.
+	NewState string `json:"newState"`
+}
+
+// IncidentPriorityElevatedPayload is the Payload shape for
+// TypeIncidentPriorityElevated — the second trigger that starts a call
+// escalation, alongside incident.created. Published only when the priority
+// genuinely increases in urgency; a downgrade or a no-op re-PATCH publishes
+// nothing.
+type IncidentPriorityElevatedPayload struct {
+	// OldPriority is the priority before the change, e.g. "MODERATE".
+	OldPriority string `json:"oldPriority"`
+	// NewPriority is the priority after the change, e.g. "HIGH" — the
+	// escalation timings are keyed by this one.
+	NewPriority string `json:"newPriority"`
+	// Title is the incident subject, for display only — unlike
+	// IncidentCreatedPayload's own Title, this one is optional. It comes from
+	// a nilable ServiceNow field, and rejecting the event over it would
+	// dead-letter a genuine escalation trigger for a cosmetic reason.
+	Title string `json:"title,omitempty"`
 }

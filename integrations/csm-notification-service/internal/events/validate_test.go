@@ -40,8 +40,14 @@ func TestValidate_Valid(t *testing.T) {
 		"case.severity_changed":                 {"CASE-1", TypeSeverityChanged, `{"projectId":"PROJ-1","caseId":"CASE-1","oldSeverity":"HIGH","newSeverity":"LOW","recipients":["r@x.com"]}`},
 		"incident.created":                      {"INC-1", TypeIncidentCreated, `{"product":"api-manager","title":"P1 outage","shortDescription":"Everything is down","callTo":"+15551234567"}`},
 		"incident.created omits product/callTo": {"INC-1", TypeIncidentCreated, `{"title":"P1 outage","shortDescription":"Everything is down"}`},
-		"sla.clock.register":                    {"CASE-1", TypeSLAClockRegister, `{"caseId":"CASE-1","durations":{"response":"2h"}}`},
-		"sla.tier_reached":                      {"CASE-1", TypeSLATierReached, `{"caseId":"CASE-1","clockType":"response","tier":"50"}`},
+		"incident.acknowledged":                 {"INC-1", TypeIncidentAcknowledged, `{"previousState":"NEW","newState":"IN_PROGRESS"}`},
+		"incident.priority_elevated":            {"INC-1", TypeIncidentPriorityElevated, `{"oldPriority":"MODERATE","newPriority":"HIGH","title":"Gateway 500s"}`},
+		// entity-service builds title from a nilable ServiceNow field, so it
+		// can genuinely publish this. It must not be rejected: an invalid
+		// payload is retried, dead-lettered and dropped.
+		"incident.priority_elevated without a title": {"INC-1", TypeIncidentPriorityElevated, `{"oldPriority":"MODERATE","newPriority":"HIGH"}`},
+		"sla.clock.register":                         {"CASE-1", TypeSLAClockRegister, `{"caseId":"CASE-1","durations":{"response":"2h"}}`},
+		"sla.tier_reached":                           {"CASE-1", TypeSLATierReached, `{"caseId":"CASE-1","clockType":"response","tier":"50"}`},
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -105,6 +111,10 @@ func TestValidate_RequiresFields(t *testing.T) {
 		"sla.tier_reached missing tier":               {"CASE-1", TypeSLATierReached, `{"caseId":"CASE-1","clockType":"response"}`},
 		"sla.tier_reached invalid tier":               {"CASE-1", TypeSLATierReached, `{"caseId":"CASE-1","clockType":"response","tier":"60"}`},
 		"sla.tier_reached caseId/entityId mismatch":   {"CASE-1", TypeSLATierReached, `{"caseId":"CASE-2","clockType":"response","tier":"50"}`},
+		"incident.acknowledged without entityId":      {"", TypeIncidentAcknowledged, `{"previousState":"NEW","newState":"IN_PROGRESS"}`},
+		"incident.acknowledged without newState":      {"INC-1", TypeIncidentAcknowledged, `{"previousState":"NEW"}`},
+		"incident.priority_elevated without newP":     {"INC-1", TypeIncidentPriorityElevated, `{"oldPriority":"MODERATE","title":"t"}`},
+		"incident.priority_elevated without oldP":     {"INC-1", TypeIncidentPriorityElevated, `{"newPriority":"HIGH","title":"t"}`},
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {

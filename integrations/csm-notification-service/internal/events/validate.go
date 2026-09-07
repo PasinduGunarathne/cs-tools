@@ -173,6 +173,37 @@ func Validate(entityID string, t Type, raw json.RawMessage) error {
 		if p.CallTo != "" && !e164Pattern.MatchString(p.CallTo) {
 			return fmt.Errorf("events: %s callTo %q is not a valid E.164 phone number", t, p.CallTo)
 		}
+	case TypeIncidentAcknowledged:
+		var p IncidentAcknowledgedPayload
+		if err := decodeStrict(raw, &p); err != nil {
+			return err
+		}
+		// entityID is the incident id — the only thing that ties this signal
+		// to the ladder it cancels, so an empty one is useless rather than
+		// merely incomplete. PreviousState/NewState are both required: the
+		// publisher only emits this on a transition it has already
+		// established, so a missing side means the payload is wrong.
+		if entityID == "" || p.PreviousState == "" || p.NewState == "" {
+			return fmt.Errorf("events: missing required field for %s", t)
+		}
+	case TypeIncidentPriorityElevated:
+		var p IncidentPriorityElevatedPayload
+		if err := decodeStrict(raw, &p); err != nil {
+			return err
+		}
+		// Same reasoning as incident.created for entityID; both priorities are
+		// required because the elevation itself is the event.
+		//
+		// Title is deliberately NOT required, unlike incident.created's. It is
+		// display-only (the escalation voice message is built from priority,
+		// account, case id and team), it originates in a nilable ServiceNow
+		// field, and a failure here is not free: an invalid payload is
+		// retried, dead-lettered, retried again and dropped. Rejecting a
+		// genuine escalation trigger because the subject was empty is the
+		// wrong trade.
+		if entityID == "" || p.OldPriority == "" || p.NewPriority == "" {
+			return fmt.Errorf("events: missing required field for %s", t)
+		}
 	case TypeSLAClockRegister:
 		var p SLAClockRegisterPayload
 		if err := decodeStrict(raw, &p); err != nil {
