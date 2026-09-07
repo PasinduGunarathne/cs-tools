@@ -37,6 +37,16 @@ const (
 	TypeCaseAcknowledged Type = "case.acknowledged"
 	TypeSeverityChanged  Type = "case.severity_changed"
 	TypeIncidentCreated  Type = "incident.created"
+	// TypeIncidentAcknowledged / TypeIncidentPriorityElevated drive the
+	// incident call-escalation ladder in csm-notification-service. The ladder
+	// starts on incident.created (or a priority elevation) and keeps calling
+	// until one of two things happens, per the escalation specification:
+	// the incident moves out of NEW ("update the ticket status to Work In
+	// Progress to stop further notifications"), or — for an elevation — a
+	// public comment is added. incident.acknowledged is the stop signal for
+	// the first of those.
+	TypeIncidentAcknowledged     Type = "incident.acknowledged"
+	TypeIncidentPriorityElevated Type = "incident.priority_elevated"
 	// TypeSLAClockRegister belongs to csm-notification-service's own
 	// internal/slaengine, not its internal/dispatch — see
 	// SLAClockRegisterPayload's own doc comment. Published once, from
@@ -275,4 +285,51 @@ type SLAClockRegisterPayload struct {
 	Team                string            `json:"team,omitempty"`
 	Priority            string            `json:"priority,omitempty"`
 	State               string            `json:"state,omitempty"`
+}
+
+// IncidentAcknowledgedPayload is the Payload shape for
+// TypeIncidentAcknowledged — the signal that cancels a running call
+// escalation. Published by UpdateIncident when an incident genuinely leaves
+// the NEW state, never on a no-op re-PATCH (same guard reasoning as
+// publishSeverityChanged).
+//
+// Carries no Recipients: nothing is sent to anyone on acknowledgement, it
+// only stops what is already running. NewState is included so the consumer
+// can distinguish "picked up" (IN_PROGRESS) from a terminal state
+// (RESOLVED/CLOSED/CANCELLED), both of which cancel the ladder but mean
+// different things in the execution summary.
+type IncidentAcknowledgedPayload struct {
+	// PreviousState is the state the incident left, e.g. "NEW".
+	PreviousState string `json:"previousState"`
+	// NewState is the state it moved to, e.g. "IN_PROGRESS".
+	NewState string `json:"newState"`
+}
+
+// Deliberately no acknowledger identity: UpdateIncidentRequest carries no
+// actor, and this service has no way to resolve who performed an update —
+// the same reason CaseAssignedPayload stopped claiming to carry an assigner.
+// A consumer that needs it must get it from the incident's own activity feed.
+
+// IncidentPriorityElevatedPayload is the Payload shape for
+// TypeIncidentPriorityElevated — the second trigger that starts a call
+// escalation, alongside incident.created.
+//
+// Published only when the priority genuinely increases in urgency; a
+// downgrade or a no-op re-PATCH publishes nothing. The escalation ladder's
+// timings are keyed by the NEW priority, so that is what a consumer schedules
+// against.
+type IncidentPriorityElevatedPayload struct {
+	// OldPriority is the priority before the change, e.g. "MODERATE".
+	OldPriority string `json:"oldPriority"`
+	// NewPriority is the priority after the change, e.g. "HIGH" — this is
+	// what the escalation timings are keyed by, after the consumer maps a
+	// domain priority onto the specification's own P0-P4 scale.
+	NewPriority string `json:"newPriority"`
+	// Title is the incident subject, carried for display only — the escalation
+	// voice message is built from priority, account, case id and team, not
+	// from this. Optional on purpose: it comes from a nilable ServiceNow
+	// field, and an elevation must never be lost because the subject was
+	// empty. Consumers treat an empty title the way they treat an absent
+	// product, not as a malformed event.
+	Title string `json:"title,omitempty"`
 }
