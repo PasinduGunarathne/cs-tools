@@ -375,17 +375,28 @@ func main() {
 		} else {
 			// Same entity-service and same shared OAuth2 app as the SLA
 			// engine's client above — a separate client only because this one
-			// speaks to /incidents rather than the sla_clocks endpoints. Same
-			// mustEnv reasoning too: once a roster opts into this engine,
-			// every credential is required for the execution summary to ever
-			// reach the incident.
-			escalationNotes := escalation.NewEntityClient(escalation.EntityConfig{
-				BaseURL:      mustEnv("CUSTOMER_ENTITY_BASE_URL"),
-				TokenURL:     mustEnv("OAUTH2_TOKEN_URL"),
-				ClientID:     mustEnv("OAUTH2_CLIENT_ID"),
-				ClientSecret: mustEnv("OAUTH2_CLIENT_SECRET"),
-				Scopes:       splitComma(os.Getenv("CUSTOMER_ENTITY_SCOPES")),
-			})
+			// speaks to /incidents rather than the sla_clocks endpoints.
+			//
+			// Unlike that one, this is os.Getenv and genuinely optional. The
+			// SLA engine can do nothing at all without entity-service — its
+			// clocks live there. This engine's job is placing calls; the
+			// execution summary is a record of what it did. A deployment
+			// (or a laptop) without entity-service access should still be
+			// able to run a real ladder, with the summary logged instead of
+			// written back — see Engine.writeNote's nil handling.
+			var escalationNotes *escalation.EntityClient
+			if base := os.Getenv("CUSTOMER_ENTITY_BASE_URL"); base != "" {
+				escalationNotes = escalation.NewEntityClient(escalation.EntityConfig{
+					BaseURL:      base,
+					TokenURL:     os.Getenv("OAUTH2_TOKEN_URL"),
+					ClientID:     os.Getenv("OAUTH2_CLIENT_ID"),
+					ClientSecret: os.Getenv("OAUTH2_CLIENT_SECRET"),
+					Scopes:       splitComma(os.Getenv("CUSTOMER_ENTITY_SCOPES")),
+				})
+			} else {
+				slog.Warn("CUSTOMER_ENTITY_BASE_URL is not set; incident escalation will log its " +
+					"execution summary instead of writing it back to the incident")
+			}
 
 			escalationEngine := escalation.NewEngine(
 				escalation.DefaultPolicy,

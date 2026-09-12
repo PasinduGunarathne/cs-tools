@@ -682,3 +682,18 @@ func containsAll(s string, subs ...string) bool {
 	}
 	return true
 }
+
+// A deployment without entity-service access still runs a real ladder; the
+// summary is logged instead of written back. Guards the typed-nil-in-interface
+// trap in NewEngine: a nil *EntityClient assigned straight into the
+// incidentNotes field would make writeNote call a nil receiver and panic.
+func TestNewEngine_NilNotesClientDoesNotPanic(t *testing.T) {
+	e := NewEngine(DefaultPolicy, fullResolver(), nil, nil, nil, enabled())
+	if e.notes != nil {
+		t.Fatal("a nil *EntityClient must leave the interface field nil, not hold a nil pointer")
+	}
+	// writeNote is the path that would panic; it must log and return instead.
+	if err := e.writeNote(context.Background(), Plan{}, nil, ""); err != nil {
+		t.Errorf("writeNote with no client should be a no-op, got %v", err)
+	}
+}

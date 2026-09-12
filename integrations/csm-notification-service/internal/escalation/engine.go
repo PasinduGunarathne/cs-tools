@@ -80,9 +80,21 @@ type Engine struct {
 	cfg      EngineConfig
 }
 
-// NewEngine constructs an Engine.
+// NewEngine constructs an Engine. notes may be nil, in which case the
+// execution summary is logged rather than written back to the incident (see
+// writeNote) — a deployment without entity-service access still runs a real
+// ladder.
+//
+// The nil check is deliberate and must stay: assigning a nil *EntityClient
+// straight into the incidentNotes interface field would store a non-nil
+// interface holding a nil pointer, so writeNote's `e.notes == nil` would be
+// false and it would call AppendWorkNote on a nil receiver.
 func NewEngine(policies map[string]PriorityPolicy, resolver Resolver, calls *notifications.TwilioClient, store *Store, notes *EntityClient, cfg EngineConfig) *Engine {
-	return &Engine{policies: policies, resolver: resolver, calls: calls, store: store, notes: notes, cfg: cfg}
+	e := &Engine{policies: policies, resolver: resolver, calls: calls, store: store, cfg: cfg}
+	if notes != nil {
+		e.notes = notes
+	}
+	return e
 }
 
 // Handle implements eventbus.Handle for this engine's own consumer group.
