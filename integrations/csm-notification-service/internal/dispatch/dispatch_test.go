@@ -1269,7 +1269,7 @@ func TestDispatcher_Handle_IgnoresEventTypesOwnedByOtherConsumers(t *testing.T) 
 	d := newTestDispatcher(mock, chat, call)
 
 	records := []string{
-		`{"type":"sla.clock.register","entityId":"CASE-1","payload":{"caseId":"CASE-1","durations":{"response":"2h"}}}`,
+		`{"type":"sla.clock.register","entityId":"CASE-1","payload":{"caseTitle":"Gateway returning 500s","caseId":"CASE-1","durations":{"response":"2h"}}}`,
 		`{"type":"sla.tier_reached","entityId":"CASE-1","payload":{"caseId":"CASE-1","clockType":"response","tier":"50"}}`,
 	}
 	// The two incident-escalation types are ignored here for the same reason:
