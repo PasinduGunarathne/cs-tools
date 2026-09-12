@@ -47,6 +47,16 @@ const (
 	// the first of those.
 	TypeIncidentAcknowledged     Type = "incident.acknowledged"
 	TypeIncidentPriorityElevated Type = "incident.priority_elevated"
+	// TypeIncidentCommentAdded is the second way a call escalation stops.
+	// Section 3.0 gives two acknowledgement gestures, one per trigger: a newly
+	// reported incident is acknowledged by moving it to Work In Progress
+	// (TypeIncidentAcknowledged), while a PRIORITY ELEVATION is acknowledged
+	// by adding a public comment — which is what section 10.0's own voice
+	// message instructs an elevation's recipient to do. Without this event an
+	// elevation's ladder had no stop signal at all: the incident has normally
+	// already left NEW by the time its priority is raised, so
+	// TypeIncidentAcknowledged can never fire again for it.
+	TypeIncidentCommentAdded Type = "incident.comment_added"
 	// TypeSLAClockRegister belongs to csm-notification-service's own
 	// internal/slaengine, not its internal/dispatch — see
 	// SLAClockRegisterPayload's own doc comment. Published once, from
@@ -249,6 +259,60 @@ type CaseCreatedPayload struct {
 type IncidentCreatedPayload struct {
 	Title            string `json:"title"`
 	ShortDescription string `json:"shortDescription"`
+
+	// The remaining fields feed csm-notification-service's call-escalation
+	// ladder (its internal/escalation), which needs the priority that keys
+	// the timing table plus the routing attributes that select recipients.
+	// Every one is optional on the wire: publishIncidentCreated resolves them
+	// from a post-create read of the incident, and that read is best-effort —
+	// when it fails, this event is published with Title/ShortDescription
+	// alone, exactly as it was before these fields existed, and the ladder
+	// simply does not start. Keep in sync with csm-notification-service's own
+	// IncidentCreatedPayload by hand, same as every payload above.
+	//
+	// Note this struct has no Product or CallTo, unlike the consumer's
+	// version: this service has no product-to-Chat-space mapping and no
+	// on-call paging system of its own, so it has never supplied either and
+	// the consumer substitutes its own configured defaults.
+	Number      string `json:"number,omitempty"`
+	Priority    string `json:"priority,omitempty"`
+	Account     string `json:"account,omitempty"`
+	Team        string `json:"team,omitempty"`
+	ABTEligible bool   `json:"abtEligible,omitempty"`
+	// ReportedAt is when the incident was opened, RFC3339. Every call in the
+	// ladder is an offset from this rather than from consume time, so a
+	// backlogged consumer cannot shift the whole ladder later than the
+	// escalation specification intends — the same reasoning
+	// SLAClockRegisterPayload.CaseCreatedAt applies to an SLA clock.
+	ReportedAt string `json:"reportedAt,omitempty"`
+}
+
+// IncidentCommentAddedPayload is the Payload shape for
+// TypeIncidentCommentAdded — published by CreateComment when a comment lands
+// on an incident.
+//
+// IsPublic is the whole point of the event. Section 3.0's acknowledgement
+// gesture for a priority elevation is a PUBLIC comment; a work note is an
+// internal jotting and must not stop anyone's pager. The consumer decides what
+// to do with each, rather than this service publishing only the public ones —
+// keeping the event a statement of fact, the same way every payload here does.
+//
+// KNOWN GAP: this carries no author. Incidents have no customer-portal surface
+// in this platform (csm-notification-service's recipientlinks builds only a
+// CSM /operations/incidents link for them), so a public comment on one is
+// written by internal staff in practice and the distinction does not yet
+// matter. If incidents ever become customer-visible, an author must be added
+// and checked before a comment is allowed to cancel an escalation — otherwise
+// a customer's own comment would silence the page meant to get their incident
+// attended to. Resolving one needs a follow-up comment search (see
+// snCaseService.resolveCommentAuthor), so it is flagged here rather than
+// built speculatively.
+type IncidentCommentAddedPayload struct {
+	// CommentID is the created comment, for traceability in the escalation
+	// execution summary.
+	CommentID string `json:"commentId"`
+	// IsPublic is false for a work note.
+	IsPublic bool `json:"isPublic"`
 }
 
 // SLAClockRegisterPayload is the Payload shape for TypeSLAClockRegister —
@@ -332,4 +396,15 @@ type IncidentPriorityElevatedPayload struct {
 	// empty. Consumers treat an empty title the way they treat an absent
 	// product, not as a malformed event.
 	Title string `json:"title,omitempty"`
+
+	// The remaining fields mirror IncidentCreatedPayload's own escalation
+	// inputs and are optional for the same reason. Unlike the created event,
+	// these come from the post-PATCH incident this service already holds, so
+	// no extra read is needed to populate them.
+	Number      string `json:"number,omitempty"`
+	Account     string `json:"account,omitempty"`
+	Team        string `json:"team,omitempty"`
+	ABTEligible bool   `json:"abtEligible,omitempty"`
+	// ElevatedAt is when the priority actually changed, RFC3339.
+	ElevatedAt string `json:"elevatedAt,omitempty"`
 }

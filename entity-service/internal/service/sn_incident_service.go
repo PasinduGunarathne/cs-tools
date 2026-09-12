@@ -774,15 +774,26 @@ func (s *snIncidentService) CreateIncident(ctx context.Context, req domain.Creat
 	resp.Incident.Number = snResp.Incident.Number
 	resp.Incident.CreatedOn = snResp.Incident.CreatedOn
 	resp.Incident.CreatedBy = snResp.Incident.CreatedBy
-	s.publishIncidentCreated(ctx, req, resp.Incident.ID)
+	s.publishIncidentCreated(ctx, req, resp.Incident.ID, resp.Incident.Number, resp.Incident.CreatedOn)
 	return resp, nil
 }
 
 // publishIncidentCreated best-effort publishes an incident.created event for
-// a newly created incident. Unlike publishCaseCreated, no enrichment round
-// trip is needed: Title/ShortDescription come directly from req, which
-// already carries everything the notification needs (Subject, and
-// optionally AdditionalComments) without a follow-up GetIncidentByID call.
+// a newly created incident. Title/ShortDescription come directly from req,
+// and Number/ReportedAt from the create response, so neither needs a read.
+//
+// The escalation fields do need one. The call-escalation ladder is keyed on
+// the incident's PRIORITY, which ServiceNow derives from impact and urgency
+// and which neither req nor the create response carries — and on the assigned
+// team's display name, where req has only a sys_id. So this makes one
+// best-effort GetIncidentByID call to resolve them.
+//
+// That read is deliberately not fatal and not even required: if it fails, the
+// event is published with exactly the fields it carried before the ladder
+// existed, and the consumer's ladder simply does not start (see
+// events.IncidentCreatedPayload). Losing the Chat alert and the direct call —
+// which is what returning early would do — would be a strictly worse outcome
+// than losing the ladder.
 //
 // ShortDescription falls back to req.Subject when req.AdditionalComments is
 // absent — a freshly created incident often has no additional comments yet,
@@ -803,7 +814,7 @@ func (s *snIncidentService) CreateIncident(ctx context.Context, req domain.Creat
 // publishCaseCreated's doc comment for why (same reasoning applies here).
 // Any failure is logged and does not fail CreateIncident itself: the
 // incident already exists in ServiceNow by this point.
-func (s *snIncidentService) publishIncidentCreated(ctx context.Context, req domain.CreateIncidentRequest, incidentID string) {
+func (s *snIncidentService) publishIncidentCreated(ctx context.Context, req domain.CreateIncidentRequest, incidentID, number, createdOn string) {
 	if s.publisher == nil {
 		return
 	}
@@ -815,10 +826,33 @@ func (s *snIncidentService) publishIncidentCreated(ctx context.Context, req doma
 		shortDescription = *req.AdditionalComments
 	}
 
-	payload, err := json.Marshal(events.IncidentCreatedPayload{
+	event := events.IncidentCreatedPayload{
 		Title:            req.Subject,
 		ShortDescription: shortDescription,
-	})
+		Number:           number,
+		ReportedAt:       snTimeToRFC3339(ctx, "sn create incident", "createdOn", createdOn),
+	}
+	if view, verr := s.GetIncidentByID(ctx, incidentID); verr == nil {
+		if view.Priority != nil {
+			event.Priority = *view.Priority
+		}
+		if view.AssignmentGroup != nil {
+			event.Team = view.AssignmentGroup.Name
+		}
+		// openedOn is the incident's own "when the customer reported this",
+		// which is what the ladder should measure from; createdOn above is
+		// only the fallback for when the read fails.
+		if view.OpenedOn != nil {
+			if opened := snTimeToRFC3339(ctx, "sn create incident", "openedOn", *view.OpenedOn); opened != "" {
+				event.ReportedAt = opened
+			}
+		}
+	} else {
+		slog.WarnContext(ctx, "sn create incident: escalation enrichment fetch failed; publishing without escalation fields",
+			"incidentId", incidentID)
+	}
+
+	payload, err := json.Marshal(event)
 	if err != nil {
 		slog.ErrorContext(ctx, "sn create incident: encode incident.created payload failed", "incidentId", incidentID, "error", err)
 		return
@@ -833,6 +867,22 @@ func (s *snIncidentService) publishIncidentCreated(ctx context.Context, req doma
 		// needs to debug this specific failure.
 		slog.ErrorContext(ctx, "sn create incident: publish incident.created failed", "incidentId", incidentID)
 	}
+}
+
+// snTimeToRFC3339 converts a ServiceNow datetime string to RFC3339, returning
+// "" when it is absent or unparsable. Uses parseSNDateTime so it tolerates
+// both formats ServiceNow is known to return (see that function's own doc
+// comment); an empty result makes the consumer fall back to consume time
+// rather than to a zero timestamp, which would place the whole ladder in 1970.
+func snTimeToRFC3339(ctx context.Context, callSite, field, value string) string {
+	if value == "" {
+		return ""
+	}
+	t, err := parseSNDateTime(ctx, callSite, field, value)
+	if err != nil {
+		return ""
+	}
+	return t.Format(time.RFC3339)
 }
 
 // snIncidentSubcategoryLabelMap maps SN subcategory string values to domain enum strings.
@@ -1423,11 +1473,24 @@ func (s *snIncidentService) publishIncidentPriorityElevated(
 	if after.Subject != nil {
 		title = *after.Subject
 	}
-	payload, err := json.Marshal(events.IncidentPriorityElevatedPayload{
+	event := events.IncidentPriorityElevatedPayload{
 		OldPriority: oldP,
 		NewPriority: newP,
 		Title:       title,
-	})
+		// ElevatedAt is "now" rather than a field off the incident: the PATCH
+		// that caused this elevation has just been applied, and this is the
+		// instant the ladder's own offsets should run from. updatedOn would
+		// be the same moment but rendered in ServiceNow's own format, and
+		// depends on the response carrying it.
+		ElevatedAt: time.Now().UTC().Format(time.RFC3339),
+	}
+	if after.Number != nil {
+		event.Number = *after.Number
+	}
+	if after.AssignmentGroup != nil {
+		event.Team = after.AssignmentGroup.Name
+	}
+	payload, err := json.Marshal(event)
 	if err != nil {
 		slog.ErrorContext(ctx, "sn update incident: encode incident.priority_elevated payload failed", "incidentId", incidentID, "error", err)
 		return

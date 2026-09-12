@@ -306,7 +306,7 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, service.Even
 
 	var commentHandler *handler.CommentHandler
 	if cfg.DataSource == config.DataSourceServiceNow {
-		commentHandler = handler.NewCommentHandler(service.NewServiceNowCommentService(serviceNowIntegrationServiceClient))
+		commentHandler = handler.NewCommentHandler(service.NewServiceNowCommentService(serviceNowIntegrationServiceClient, eventPublisher))
 	}
 
 	var taskSlaHandler *handler.TaskSlaHandler
