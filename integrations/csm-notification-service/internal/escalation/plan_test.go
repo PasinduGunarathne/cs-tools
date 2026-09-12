@@ -21,6 +21,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/wso2-open-operations/cs-tools/integrations/csm-notification-service/internal/notifications"
 )
 
 var triggerAt = time.Date(2026, 9, 6, 11, 0, 0, 0, time.UTC)
@@ -211,29 +213,70 @@ func TestBuildPlan_UnknownPriorityIsAnError(t *testing.T) {
 
 // The voice message must carry the instruction that actually stops the ladder,
 // and it differs between the two triggers.
-func TestVoiceMessage_InstructionMatchesTrigger(t *testing.T) {
-	newIncident := testTrigger("P1", ShiftLK).VoiceMessage()
+func TestVoiceSpeech_InstructionMatchesTrigger(t *testing.T) {
+	newIncident := spokenText(testTrigger("P1", ShiftLK).VoiceSpeech())
 	if !strings.Contains(newIncident, "Work In Progress") {
 		t.Errorf("new-incident message must instruct a status change:\n%s", newIncident)
 	}
 	elevated := testTrigger("P1", ShiftLK)
 	elevated.Kind = TriggerPriorityElevated
-	msg := elevated.VoiceMessage()
-	if !strings.Contains(msg, "public comment") {
+	if msg := spokenText(elevated.VoiceSpeech()); !strings.Contains(msg, "public comment") {
 		t.Errorf("elevation message must instruct a public comment:\n%s", msg)
 	}
-	for _, want := range []string{"<speak>", "WSO2 Support Alert.", "Automation Test Account", "AUTOMATIONTESTSUB-1299"} {
+	for _, want := range []string{"WSO2 Support Alert.", "Automation Test Account", "AUTOMATIONTESTSUB-1299"} {
 		if !strings.Contains(newIncident, want) {
 			t.Errorf("voice message missing %q", want)
 		}
 	}
 }
 
+// A sentence whose only content would be an empty value is skipped, rather
+// than spoken as "Account - ." — incidents in this platform carry no account.
+func TestVoiceSpeech_SkipsEmptySlots(t *testing.T) {
+	tr := testTrigger("P1", ShiftLK)
+	tr.Account = ""
+	tr.Team = ""
+	tr.WSO2CaseID = ""
+	tr.Number = "INC0012345"
+
+	spoken := spokenText(tr.VoiceSpeech())
+	for _, unwanted := range []string{"Account -", "Team -"} {
+		if strings.Contains(spoken, unwanted) {
+			t.Errorf("expected no %q sentence when the value is empty:\n%s", unwanted, spoken)
+		}
+	}
+	// The incident number stands in for the missing WSO2 case id.
+	if !strings.Contains(spoken, "INC0012345") {
+		t.Errorf("expected the incident number as the case reference:\n%s", spoken)
+	}
+}
+
+// spokenText flattens a Speech into the words a listener would hear, so a test
+// can assert on content without asserting on XML.
+func spokenText(s notifications.Speech) string {
+	var b strings.Builder
+	for _, sentence := range s.Sentences {
+		for _, part := range sentence.Parts {
+			switch {
+			case part.Prosody != nil:
+				b.WriteString(part.Prosody.Text)
+			case part.Emphasis != nil:
+				b.WriteString(part.Emphasis.Text)
+			case part.Break != nil:
+			default:
+				b.WriteString(part.Text)
+			}
+		}
+		b.WriteString(" ")
+	}
+	return b.String()
+}
+
 // The execution summary must read like the specification's own work note.
 func TestExecutionSummary_MatchesDocumentedFormat(t *testing.T) {
 	plan, _ := BuildPlan(context.Background(), testTrigger("P1", ShiftLKMorning), DefaultPolicy, fullResolver())
 	ack := triggerAt.Add(12 * time.Minute)
-	lines := plan.ExecutionSummary(&ack)
+	lines := plan.ExecutionSummary(&ack, "")
 
 	if !strings.HasPrefix(lines[0], "[2026-09-06 11:00:00][OK][Start : Notification Plan - New Case][CS0436083/AUTOMATIONTESTSUB-1299]") {
 		t.Errorf("first line does not match the documented header:\n%s", lines[0])
@@ -332,7 +375,7 @@ func TestExecutionSummary_ReportsLevelWithNoCalls(t *testing.T) {
 		}
 	}
 
-	summary := strings.Join(plan.ExecutionSummary(nil), "\n")
+	summary := strings.Join(plan.ExecutionSummary(nil, ""), "\n")
 	for _, want := range []string{
 		"[LEVEL_1][OK][Start : Escalation Step]",
 		"[LEVEL_1][ERROR][NO_NUMBER][no.number@wso2.com]",

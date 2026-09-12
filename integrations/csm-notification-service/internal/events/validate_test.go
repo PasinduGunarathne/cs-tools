@@ -46,6 +46,8 @@ func TestValidate_Valid(t *testing.T) {
 		// can genuinely publish this. It must not be rejected: an invalid
 		// payload is retried, dead-lettered and dropped.
 		"incident.priority_elevated without a title": {"INC-1", TypeIncidentPriorityElevated, `{"oldPriority":"MODERATE","newPriority":"HIGH"}`},
+		"incident.comment_added (public)":            {"INC-1", TypeIncidentCommentAdded, `{"commentId":"c-1","isPublic":true}`},
+		"incident.comment_added (work note)":         {"INC-1", TypeIncidentCommentAdded, `{"commentId":"c-1","isPublic":false}`},
 		"sla.clock.register":                         {"CASE-1", TypeSLAClockRegister, `{"caseId":"CASE-1","durations":{"response":"2h"}}`},
 		"sla.tier_reached":                           {"CASE-1", TypeSLATierReached, `{"caseId":"CASE-1","clockType":"response","tier":"50"}`},
 	}
@@ -115,6 +117,7 @@ func TestValidate_RequiresFields(t *testing.T) {
 		"incident.acknowledged without newState":      {"INC-1", TypeIncidentAcknowledged, `{"previousState":"NEW"}`},
 		"incident.priority_elevated without newP":     {"INC-1", TypeIncidentPriorityElevated, `{"oldPriority":"MODERATE","title":"t"}`},
 		"incident.priority_elevated without oldP":     {"INC-1", TypeIncidentPriorityElevated, `{"newPriority":"HIGH","title":"t"}`},
+		"incident.comment_added without commentId":    {"INC-1", TypeIncidentCommentAdded, `{"isPublic":true}`},
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {

@@ -74,6 +74,7 @@ const dryRunPlaceholderNumber = "+10000000000"
 type config struct {
 	priority  string
 	shift     string
+	notABT    bool
 	kind      string
 	to        string
 	minute    time.Duration
@@ -104,13 +105,14 @@ func parseFlags() config {
 	var cfg config
 	flag.StringVar(&cfg.priority, "priority", "P1", "incident priority: P0-P4, or CRITICAL/HIGH/MODERATE/LOW/PLANNING")
 	flag.StringVar(&cfg.shift, "shift", "LK_MORNING", "shift when reported: LK, LK_MORNING, LK_EVENING, LK_WEEKEND, USA, USA_WEEKEND (a rotation shift adds LEVEL_0)")
+	flag.BoolVar(&cfg.notABT, "not-abt", false, "treat the account as NOT ABT-eligible (the IAM side), which is what gives a USA_WEEKEND incident a LEVEL_0 - see rules R10 vs R12")
 	flag.StringVar(&cfg.kind, "kind", "new", "what started the ladder: new or elevated")
 	flag.StringVar(&cfg.to, "to", "", "E.164 number every level calls, e.g. +94771234567 (required with --live)")
 	flag.DurationVar(&cfg.minute, "minute", time.Second, "how long one real ladder minute lasts, e.g. 1s compresses a 44m P1 ladder into 44s")
 	flag.DurationVar(&cfg.ackAfter, "ack-after", 0, "acknowledge this far into the compressed run and cancel the rest; 0 runs the whole ladder")
 	flag.BoolVar(&cfg.live, "live", false, "actually place calls through Twilio; without this nothing is dialled")
 	flag.IntVar(&cfg.maxCalls, "max-calls", 20, "refuse to place more than this many calls")
-	flag.BoolVar(&cfg.useSSML, "ssml", false, "send the SSML message instead of the plain one; MakeCall escapes it, so Twilio reads the markup aloud - for demonstrating that gap only")
+	flag.BoolVar(&cfg.useSSML, "ssml", false, "speak the SSML message (pauses, and the case reference slowed down) instead of the plain one")
 	flag.StringVar(&cfg.account, "account", "Automation Test Account", "account name spoken in the call")
 	flag.StringVar(&cfg.team, "team", "Americas CS Team - Integration", "CS team spoken in the call")
 	flag.StringVar(&cfg.caseID, "case-id", "WSO2-1042", "internal case reference spoken in the call")
@@ -166,7 +168,7 @@ func run(cfg config) error {
 		At:         time.Now(),
 		Routing: escalation.RoutingContext{
 			Product:         "WSO2 API Manager",
-			ABTEligible:     true,
+			ABTEligible:     !cfg.notABT,
 			AssignedCRETeam: "Atlas",
 			Shift:           shift,
 		},
@@ -203,7 +205,14 @@ func run(cfg config) error {
 	fmt.Printf("\n%s\n", strings.Repeat("-", 78))
 	fmt.Printf("Execution summary (this is the work note the engine would write back)\n")
 	fmt.Printf("%s\n", strings.Repeat("-", 78))
-	for _, line := range plan.ExecutionSummary(cancelledAt) {
+	// The harness acknowledges by the gesture matching the trigger, which is
+	// how section 3.0 pairs them: a status change for a new incident, a public
+	// comment for a priority elevation.
+	reason := "Acknowledged"
+	if trigger.Kind == escalation.TriggerPriorityElevated {
+		reason = "Public comment added"
+	}
+	for _, line := range plan.ExecutionSummary(cancelledAt, reason) {
 		fmt.Println(line)
 	}
 	fmt.Printf("\n%d call(s) %s.\n", placed, map[bool]string{true: "placed", false: "simulated"}[cfg.live])
@@ -250,12 +259,14 @@ func parseShift(s string) (escalation.Shift, error) {
 	}
 }
 
-// caller places one call, or reports what it would have placed.
-type caller func(ctx context.Context, to, message string) error
+// caller places one call for a trigger, or reports what it would have placed.
+// Taking the trigger rather than a rendered string is what lets --ssml pick the
+// structured document over the flat one at the point of dialling.
+type caller func(ctx context.Context, to string, t escalation.Trigger) error
 
 func buildCaller(cfg config) (caller, error) {
 	if !cfg.live {
-		return func(_ context.Context, _, _ string) error { return nil }, nil
+		return func(_ context.Context, _ string, _ escalation.Trigger) error { return nil }, nil
 	}
 	missing := []string{}
 	for _, k := range []string{"TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_FROM_NUMBER"} {
@@ -274,7 +285,14 @@ func buildCaller(cfg config) (caller, error) {
 		Language:   os.Getenv("TWILIO_LANGUAGE"),
 		APIBaseURL: os.Getenv("TWILIO_API_BASE_URL"),
 	})
-	return client.MakeCall, nil
+	if cfg.useSSML {
+		return func(ctx context.Context, to string, t escalation.Trigger) error {
+			return client.MakeSSMLCall(ctx, to, t.VoiceSpeech())
+		}, nil
+	}
+	return func(ctx context.Context, to string, t escalation.Trigger) error {
+		return client.MakeCall(ctx, to, t.VoiceMessagePlain())
+	}, nil
 }
 
 func printPlan(cfg config, trigger escalation.Trigger, plan escalation.Plan) {
@@ -287,9 +305,9 @@ func printPlan(cfg config, trigger escalation.Trigger, plan escalation.Plan) {
 	fmt.Printf("Incident call escalation ladder - %s\n", mode)
 	fmt.Printf("%s\n", strings.Repeat("=", 78))
 	fmt.Printf("  priority        %s\n", trigger.Priority)
-	fmt.Printf("  shift           %s (rotation: %t, so LEVEL_0 %s)\n",
-		trigger.Routing.Shift, trigger.Routing.Shift.IsRotation(),
-		map[bool]string{true: "runs", false: "is skipped"}[trigger.Routing.Shift.IsRotation()])
+	fmt.Printf("  shift           %s (rotation: %t, ABT-eligible: %t, so LEVEL_0 %s)\n",
+		trigger.Routing.Shift, trigger.Routing.Shift.IsRotation(), trigger.Routing.ABTEligible,
+		map[bool]string{true: "runs", false: "is skipped"}[trigger.Routing.HasNotificationLevel()])
 	fmt.Printf("  trigger         %s\n", trigger.Kind)
 	fmt.Printf("  clock           1 ladder minute = %s\n", cfg.minute)
 	if cfg.ackAfter > 0 {
@@ -305,13 +323,11 @@ func printPlan(cfg config, trigger escalation.Trigger, plan escalation.Plan) {
 		fmt.Printf("    %-8s %-8s %s %s\n", "", is.Level, is.Reason, is.Detail)
 	}
 
-	msg := trigger.VoiceMessagePlain()
 	label := "spoken message (plain)"
 	if cfg.useSSML {
-		msg = trigger.VoiceMessage()
-		label = "spoken message (SSML - MakeCall escapes this, so it is read aloud as markup)"
+		label = "spoken message (SSML - pauses and a slowed case reference)"
 	}
-	fmt.Printf("\n  %s:\n    %s\n", label, msg)
+	fmt.Printf("\n  %s:\n    %s\n", label, trigger.VoiceMessagePlain())
 	fmt.Printf("\n  running (ctrl-c to stop)...\n\n")
 }
 
@@ -319,11 +335,6 @@ func printPlan(cfg config, trigger escalation.Trigger, plan escalation.Plan) {
 // comes due. It returns how many calls went out and, if the run was
 // acknowledged or interrupted, the real-clock instant that happened at.
 func runLadder(ctx context.Context, cfg config, trigger escalation.Trigger, plan escalation.Plan, place caller) (int, *time.Time) {
-	msg := trigger.VoiceMessagePlain()
-	if cfg.useSSML {
-		msg = trigger.VoiceMessage()
-	}
-
 	start := time.Now()
 	var placed int
 
@@ -348,7 +359,7 @@ func runLadder(ctx context.Context, cfg config, trigger escalation.Trigger, plan
 		}
 
 		elapsed := time.Since(start).Round(time.Millisecond)
-		if err := place(ctx, c.Recipient.Phone, msg); err != nil {
+		if err := place(ctx, c.Recipient.Phone, trigger); err != nil {
 			fmt.Printf("  [%6s] %-8s #%d  %-18s FAILED: %v\n", short(elapsed), c.Level, c.Ordinal, c.Recipient.Name, err)
 			continue
 		}

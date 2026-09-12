@@ -187,13 +187,29 @@ var DefaultPolicy = map[string]PriorityPolicy{
 	},
 }
 
-// priorityAliases maps the severity labels the platform also uses onto the
+// priorityAliases maps the priority/severity labels the platform uses onto the
 // P-notation the timing table is keyed by, so a caller may pass either.
+//
+// Two vocabularies feed this, and both must resolve:
+//
+//   - Case severity: CATASTROPHIC, CRITICAL, HIGH, MEDIUM, LOW.
+//   - Incident priority (entity-service's domain.IncidentPriority, which is
+//     ServiceNow's own priority enum): CRITICAL, HIGH, MODERATE, LOW,
+//     PLANNING.
+//
+// They overlap everywhere except MODERATE, which is the incident spelling of
+// MEDIUM. Section 10.0's worked example ("Priority - Critical (P1)") is what
+// pins CRITICAL to P1 rather than to P0.
+//
+// PLANNING is deliberately absent: section 7.0 has no row below P4, so a
+// planning-priority incident has no ladder at all. Lookup reports that as
+// "not found" and the engine skips it — see Engine.start.
 var priorityAliases = map[string]string{
 	"CATASTROPHIC": "P0",
 	"CRITICAL":     "P1",
 	"HIGH":         "P2",
 	"MEDIUM":       "P3",
+	"MODERATE":     "P3",
 	"LOW":          "P4",
 }
 

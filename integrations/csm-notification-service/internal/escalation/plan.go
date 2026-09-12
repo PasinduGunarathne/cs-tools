@@ -22,6 +22,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/wso2-open-operations/cs-tools/integrations/csm-notification-service/internal/notifications"
 )
 
 // Trigger is what starts a ladder: an incident being created, or its priority
@@ -82,6 +84,10 @@ type Plan struct {
 	Trigger Trigger
 	Calls   []PlannedCall
 	Issues  []PlanIssue
+	// InitialWait is the priority's own pre-ladder delay (section 7.0's
+	// "Initial waiting time"), kept so ExecutionSummary can report it the way
+	// section 11.0's work note does.
+	InitialWait time.Duration
 }
 
 // BuildPlan expands a trigger into every call the ladder would place, with
@@ -110,14 +116,14 @@ func BuildPlan(ctx context.Context, t Trigger, policies map[string]PriorityPolic
 	// Group the flat schedule by level, keeping levels in the order they open.
 	var order []Level
 	attemptsByLevel := map[Level][]Attempt{}
-	for _, a := range Schedule(policy, t.Routing.Shift.IsRotation()) {
+	for _, a := range Schedule(policy, t.Routing.HasNotificationLevel()) {
 		if _, seen := attemptsByLevel[a.Level]; !seen {
 			order = append(order, a.Level)
 		}
 		attemptsByLevel[a.Level] = append(attemptsByLevel[a.Level], a)
 	}
 
-	plan := Plan{Trigger: t}
+	plan := Plan{Trigger: t, InitialWait: policy.InitialWait}
 	for _, level := range order {
 		attempts := attemptsByLevel[level]
 		opensAt := t.At.Add(attempts[0].After)
@@ -185,44 +191,103 @@ func (p Plan) Delivered(at time.Time) []PlannedCall {
 	return out
 }
 
-// VoiceMessage renders the SSML the specification defines for the Twilio
-// alert, including the instruction that differs between the two triggers.
+// caseRef is the reference the voice message reads out: the platform's own
+// WSO2 case id when there is one, else the incident's human-readable number.
 //
-// IMPORTANT: this cannot be handed to notifications.TwilioClient.MakeCall as
-// it stands. That path builds its <Say> document by marshaling a typed struct,
-// so the message lands in chardata and every angle bracket here is escaped —
-// Twilio would read the markup aloud rather than interpret it. The escaping is
-// deliberate (it is what stops caller-supplied text injecting a different
-// TwiML verb) and must not be removed.
-//
-// Delivering this needs an SSML-aware call path in internal/notifications that
-// marshals the SSML elements as real nested XML structs, keeping injection
-// safety by construction instead of by escaping. Until that exists, use
-// VoiceMessagePlain.
-func (t Trigger) VoiceMessage() string {
-	instruction := "Add a public comment to stop further notifications."
-	if t.Kind == TriggerNewIncident {
-		instruction = "Update the ticket status to 'Work In Progress' to stop further notifications."
+// Section 10.0 reads caserecord.u_wso2_case_id, which exists on ServiceNow's
+// CSM case records. Incidents in this platform carry no such field (see
+// domain.IncidentView in entity-service), so the incident number is the
+// closest equivalent and is what a recipient can actually search for.
+func (t Trigger) caseRef() string {
+	if t.WSO2CaseID != "" {
+		return t.WSO2CaseID
 	}
-	return "<speak>" +
-		"<s>WSO2 Support Alert.</s>" +
-		fmt.Sprintf("<s>Trigger Type - %s.</s>", t.Kind) +
-		fmt.Sprintf("<s>Priority - %s.</s>", t.Priority) +
-		fmt.Sprintf("<s>Account - %s.</s>", t.Account) +
-		fmt.Sprintf("<s>Case number - <break time='500ms' /> <prosody rate='90%%'>%s</prosody> .</s>", t.WSO2CaseID) +
-		fmt.Sprintf("<s>Team - %s.</s>", t.Team) +
-		fmt.Sprintf("<s><emphasis level='moderate'> %s</emphasis> </s> <break time='1s' /> ", instruction) +
-		"</speak>"
+	return t.Number
 }
 
-// ExecutionSummary renders the plan in the format the specification writes
-// back to the incident as a work note, so a dry run reads identically to a
-// real one.
-func (p Plan) ExecutionSummary(cancelledAt *time.Time) []string {
+// instruction is the closing line of the voice message, which differs by
+// trigger exactly as section 10.0's template does.
+func (t Trigger) instruction() string {
+	if t.Kind == TriggerNewIncident {
+		return "Update the ticket status to 'Work In Progress' to stop further notifications."
+	}
+	return "Add a public comment to stop further notifications."
+}
+
+// VoiceSpeech renders section 10.0's alert as a structured SSML document, in
+// the order and with the pauses the specification's own template produces.
+//
+// It returns a tree rather than a string on purpose. An earlier version built
+// the SSML by concatenation and could not be delivered at all: Twilio's <Say>
+// document is marshaled from a typed struct (correctly — it is what stops
+// caller-supplied text injecting a different TwiML verb), so a markup string
+// handed to it arrives escaped and is read aloud tag by tag. Handing the call
+// path a tree keeps both properties at once — real nested XML on the wire, and
+// text that can never become markup. See internal/notifications/ssml.go.
+//
+// Sentences whose only content would be an empty value are skipped rather than
+// spoken as "Account - .": incidents have no account field in this platform,
+// and a half-empty sentence sounds like a fault on the line.
+func (t Trigger) VoiceSpeech() notifications.Speech {
+	sentence := func(parts ...notifications.SpeechPart) notifications.Sentence {
+		return notifications.Sentence{Parts: parts}
+	}
+	sentences := []notifications.Sentence{
+		sentence(notifications.Say("WSO2 Support Alert.")),
+		sentence(notifications.Say(fmt.Sprintf("Trigger Type - %s.", t.Kind))),
+	}
+	if t.Priority != "" {
+		sentences = append(sentences, sentence(notifications.Say(fmt.Sprintf("Priority - %s.", t.Priority))))
+	}
+	if t.Account != "" {
+		sentences = append(sentences, sentence(notifications.Say(fmt.Sprintf("Account - %s.", t.Account))))
+	}
+	if ref := t.caseRef(); ref != "" {
+		sentences = append(sentences, sentence(
+			notifications.Say("Case number - "),
+			notifications.Pause("500ms"),
+			notifications.Say(" "),
+			notifications.Spell("90%", ref),
+			notifications.Say(" ."),
+		))
+	}
+	if t.Team != "" {
+		sentences = append(sentences, sentence(notifications.Say(fmt.Sprintf("Team - %s.", t.Team))))
+	}
+	sentences = append(sentences,
+		sentence(notifications.Stress("moderate", " "+t.instruction())),
+		sentence(notifications.Pause("1s")),
+	)
+	return notifications.Speech{Sentences: sentences}
+}
+
+// ExecutionSummary renders the plan in section 11.0's work-note format, so a
+// dry run, a live run and a cancelled run all read identically.
+//
+// The format is reproduced line for line from the specification's own example,
+// including its two inconsistent bracket orders — the escalation-step line puts
+// the level before [OK], every other line puts it after. That is how the
+// documented sample reads, and anyone diffing a real work note against the
+// document will expect it.
+//
+// cancelledAt, when non-nil, truncates the summary at an acknowledgement: only
+// what had actually happened by then is listed, followed by a closing line
+// counting what was dropped. reason names the gesture that stopped it — which
+// matters because there are two, and which one fired says whether somebody
+// changed the status or left a public comment. Empty defaults to
+// "Acknowledged", the wording the documented sample uses.
+func (p Plan) ExecutionSummary(cancelledAt *time.Time, reason string) []string {
 	const stamp = "2006-01-02 15:04:05"
 	lines := []string{
 		fmt.Sprintf("[%s][OK][Start : Notification Plan - %s][%s/%s]",
 			p.Trigger.At.Format(stamp), p.Trigger.Kind, p.Trigger.Number, p.Trigger.WSO2CaseID),
+	}
+	if p.InitialWait > 0 {
+		waitedUntil := p.Trigger.At.Add(p.InitialWait)
+		if cancelledAt == nil || waitedUntil.Before(*cancelledAt) {
+			lines = append(lines, fmt.Sprintf("[%s][OK][Initial Waiting Time: %d Minutes]",
+				waitedUntil.Format(stamp), int(p.InitialWait.Minutes())))
+		}
 	}
 
 	// Order the levels by when each opens, taking that time from the level's
@@ -275,45 +340,103 @@ func (p Plan) ExecutionSummary(cancelledAt *time.Time) []string {
 			lines = append(lines, fmt.Sprintf("[%s][%s][ERROR][%s][%s]",
 				is.At.Format(stamp), is.Level, is.Reason, is.Detail))
 		}
-		for _, c := range b.calls {
-			if cancelledAt != nil && !c.At.Before(*cancelledAt) {
+
+		// One "Notification Attempt" line per attempt, then that attempt's
+		// own calls — section 11.0 groups the per-recipient call lines under
+		// the attempt that placed them, not flat under the level.
+		for _, ord := range attemptOrdinals(b.calls) {
+			var due time.Time
+			var placed []PlannedCall
+			for _, c := range b.calls {
+				if c.Ordinal != ord {
+					continue
+				}
+				if cancelledAt != nil && !c.At.Before(*cancelledAt) {
+					continue
+				}
+				if due.IsZero() || c.At.Before(due) {
+					due = c.At
+				}
+				placed = append(placed, c)
+			}
+			if len(placed) == 0 {
 				continue
 			}
-			lines = append(lines, fmt.Sprintf("[%s][%s][OK][Call][%s][%s]",
-				c.At.Format(stamp), c.Level, c.Recipient.Email, c.Recipient.Phone))
+			lines = append(lines, fmt.Sprintf("[%s][OK][%s][Start : Notification Attempt]",
+				due.Format(stamp), b.level))
+			for _, c := range placed {
+				lines = append(lines, fmt.Sprintf("[%s][%s][OK][Call][%s][%s]",
+					c.At.Format(stamp), c.Level, c.Recipient.Email, c.Recipient.Phone))
+			}
 		}
 	}
 
 	if cancelledAt != nil {
-		lines = append(lines, fmt.Sprintf("[%s][OK][Acknowledged : %d call(s) cancelled]",
-			cancelledAt.Format(stamp), len(p.Remaining(*cancelledAt))))
+		if reason == "" {
+			reason = "Acknowledged"
+		}
+		lines = append(lines, fmt.Sprintf("[%s][OK][%s : %d call(s) cancelled]",
+			cancelledAt.Format(stamp), reason, len(p.Remaining(*cancelledAt))))
 	}
 	return lines
 }
 
-// VoiceMessagePlain renders the same alert as plain sentences, with no markup
-// at all. It carries exactly the information VoiceMessage does, minus the
-// pauses and prosody, and is safe to pass to MakeCall today: escaping plain
-// text changes nothing about how it is spoken.
-//
-// This is what a real call should use until an SSML-aware call path exists.
-func (t Trigger) VoiceMessagePlain() string {
-	instruction := "Add a public comment to stop further notifications."
-	if t.Kind == TriggerNewIncident {
-		instruction = "Update the ticket status to Work In Progress to stop further notifications."
+// WorkNote renders the execution summary as the work note section 11.0
+// specifies, heading and all, ready to PATCH onto the incident.
+func (p Plan) WorkNote(cancelledAt *time.Time, reason string) string {
+	const stamp = "2006-01-02 15:04:05"
+	var b strings.Builder
+	b.WriteString("Execution Summary Of the Escalation Flow\n\n")
+	b.WriteString(fmt.Sprintf("Incident Created/Priority Updated time: %s\n\n",
+		p.Trigger.At.Format(stamp)))
+	b.WriteString("Execution Summary:\n\n")
+	b.WriteString(strings.Join(p.ExecutionSummary(cancelledAt, reason), "\n"))
+	return b.String()
+}
+
+// attemptOrdinals lists the distinct attempt ordinals present in calls, in
+// ascending order.
+func attemptOrdinals(calls []PlannedCall) []int {
+	seen := map[int]bool{}
+	var out []int
+	for _, c := range calls {
+		if !seen[c.Ordinal] {
+			seen[c.Ordinal] = true
+			out = append(out, c.Ordinal)
+		}
 	}
+	sort.Ints(out)
+	return out
+}
+
+// VoiceMessagePlain renders the same alert as plain sentences, with no markup
+// at all. It carries exactly the information VoiceSpeech does, minus the pauses
+// and prosody, and is safe to pass to MakeCall: escaping plain text changes
+// nothing about how it is spoken.
+//
+// Kept as the fallback for a deployment that would rather not depend on SSML
+// support, and as the readable form the ladder harness prints.
+func (t Trigger) VoiceMessagePlain() string {
 	// spacedRef reads an identifier out as separated characters, which is the
 	// plain-text stand-in for the SSML version's slowed prosody: a case id
 	// spoken at normal speed is the part listeners most often mishear.
-	return strings.Join([]string{
+	parts := []string{
 		"WSO2 Support Alert.",
 		fmt.Sprintf("Trigger type, %s.", t.Kind),
-		fmt.Sprintf("Priority, %s.", t.Priority),
-		fmt.Sprintf("Account, %s.", t.Account),
-		fmt.Sprintf("Case number, %s.", spacedRef(t.WSO2CaseID)),
-		fmt.Sprintf("Team, %s.", t.Team),
-		instruction,
-	}, " ")
+	}
+	if t.Priority != "" {
+		parts = append(parts, fmt.Sprintf("Priority, %s.", t.Priority))
+	}
+	if t.Account != "" {
+		parts = append(parts, fmt.Sprintf("Account, %s.", t.Account))
+	}
+	if ref := t.caseRef(); ref != "" {
+		parts = append(parts, fmt.Sprintf("Case number, %s.", spacedRef(ref)))
+	}
+	if t.Team != "" {
+		parts = append(parts, fmt.Sprintf("Team, %s.", t.Team))
+	}
+	return strings.Join(append(parts, t.instruction()), " ")
 }
 
 // spacedRef separates a reference's characters so a text-to-speech voice reads

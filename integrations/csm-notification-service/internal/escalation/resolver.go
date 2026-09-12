@@ -32,9 +32,11 @@ const (
 	ShiftUSAWeekend Shift = "USA_WEEKEND" // 9PM - 6AM IST, weekends
 )
 
-// IsRotation reports whether this shift is a rotation, which is what decides
-// if LEVEL_0 exists for an incident at all (section 3.0). The regular LK and
-// USA business-hours shifts have no notification level.
+// IsRotation reports whether this shift is a rotation at all. The regular LK
+// and USA business-hours shifts are not, and never carry a notification level.
+//
+// A rotation is necessary but not sufficient for LEVEL_0 to exist — see
+// RoutingContext.HasNotificationLevel, which is what BuildPlan actually asks.
 func (s Shift) IsRotation() bool {
 	switch s {
 	case ShiftLKMorning, ShiftLKEvening, ShiftLKWeekend, ShiftUSAWeekend:
@@ -60,6 +62,36 @@ type RoutingContext struct {
 	AssignedCRETeam string
 	// Shift is the effective shift when the incident was reported.
 	Shift Shift
+}
+
+// HasNotificationLevel reports whether LEVEL_0 exists for this incident.
+//
+// Section 3.0 makes the notification level a rotation-only step, but the shift
+// alone does not decide it: section 6.0's matrix and the section 5.0 rule table
+// disagree about USA_WEEKEND depending on the business unit.
+//
+//   - R10 (product present, ABT-eligible, USA_WEEKEND) lists LEVEL_1..LEVEL_4
+//     only — no notification level.
+//   - R12 (product present, NOT ABT-eligible, USA_WEEKEND) and R14 (no product,
+//     USA_WEEKEND) both list "Level 0: Rota Members".
+//
+// Section 6.0's matrix agrees: on USA_WEEKEND the INTEGRATION row has neither a
+// rotation-member nor a rotation-lead tick, while the IAM row has one. ABT
+// eligibility is what separates them — the Integration/APIM BU is the
+// ABT-eligible side (see section 8.0's two team models), so an ABT-eligible
+// incident on the USA weekend rotation starts at LEVEL_1.
+//
+// Every other rotation (LK_MORNING, LK_EVENING, LK_WEEKEND) has a notification
+// level for both business units; only the recipients differ, which is the
+// Resolver's concern rather than this one's.
+func (rc RoutingContext) HasNotificationLevel() bool {
+	if !rc.Shift.IsRotation() {
+		return false
+	}
+	if rc.Shift == ShiftUSAWeekend && rc.ABTEligible {
+		return false
+	}
+	return true
 }
 
 // Recipient is one person to call or email at a level.

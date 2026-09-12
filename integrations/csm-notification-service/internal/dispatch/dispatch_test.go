@@ -1279,6 +1279,7 @@ func TestDispatcher_Handle_IgnoresEventTypesOwnedByOtherConsumers(t *testing.T) 
 	records = append(records,
 		`{"type":"incident.acknowledged","entityId":"INC-1","payload":{"previousState":"NEW","newState":"IN_PROGRESS"}}`,
 		`{"type":"incident.priority_elevated","entityId":"INC-1","payload":{"oldPriority":"MODERATE","newPriority":"HIGH","title":"t"}}`,
+		`{"type":"incident.comment_added","entityId":"INC-1","payload":{"commentId":"c-1","isPublic":true}}`,
 	)
 	for _, r := range records {
 		if err := d.Handle(context.Background(), eventbus.Record{Value: []byte(r)}); err != nil {
