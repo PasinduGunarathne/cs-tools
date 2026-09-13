@@ -276,7 +276,7 @@ func spokenText(s notifications.Speech) string {
 func TestExecutionSummary_MatchesDocumentedFormat(t *testing.T) {
 	plan, _ := BuildPlan(context.Background(), testTrigger("P1", ShiftLKMorning), DefaultPolicy, fullResolver())
 	ack := triggerAt.Add(12 * time.Minute)
-	lines := plan.ExecutionSummary(&ack, "")
+	lines := plan.ExecutionSummary(nil, &ack, "")
 
 	if !strings.HasPrefix(lines[0], "[2026-09-06 11:00:00][OK][Start : Notification Plan - New Case][CS0436083/AUTOMATIONTESTSUB-1299]") {
 		t.Errorf("first line does not match the documented header:\n%s", lines[0])
@@ -375,7 +375,7 @@ func TestExecutionSummary_ReportsLevelWithNoCalls(t *testing.T) {
 		}
 	}
 
-	summary := strings.Join(plan.ExecutionSummary(nil, ""), "\n")
+	summary := strings.Join(plan.ExecutionSummary(nil, nil, ""), "\n")
 	for _, want := range []string{
 		"[LEVEL_1][OK][Start : Escalation Step]",
 		"[LEVEL_1][ERROR][NO_NUMBER][no.number@wso2.com]",

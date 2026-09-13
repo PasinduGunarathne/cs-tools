@@ -65,6 +65,11 @@ type PlannedCall struct {
 	Ordinal   int
 	At        time.Time
 	Recipient Recipient
+	// index is this call's position in Plan.Calls, set while the summary is
+	// grouping them so it can look the call up in the engine's placed flags.
+	// Unexported: it is an artefact of that grouping, not part of the plan,
+	// and must not reach the stored JSON where it would go stale.
+	index int
 }
 
 // PlanIssue records something the plan could not do but which must not abort
@@ -270,13 +275,25 @@ func (t Trigger) VoiceSpeech() notifications.Speech {
 // documented sample reads, and anyone diffing a real work note against the
 // document will expect it.
 //
-// cancelledAt, when non-nil, truncates the summary at an acknowledgement: only
-// what had actually happened by then is listed, followed by a closing line
-// counting what was dropped. reason names the gesture that stopped it — which
-// matters because there are two, and which one fired says whether somebody
-// changed the status or left a public comment. Empty defaults to
-// "Acknowledged", the wording the documented sample uses.
-func (p Plan) ExecutionSummary(cancelledAt *time.Time, reason string) []string {
+// placed is parallel to Plan.Calls and says which calls were actually dialled.
+// Pass it whenever it is known — the engine always knows — and the summary
+// reports only those. Passing nil falls back to "everything scheduled before
+// cancelledAt", which is all a caller without an engine (cmd/ladder-harness)
+// can say.
+//
+// The distinction is not cosmetic. A cancellation and a call due at the same
+// instant race, and the cancellation wins: the wake entries are dropped before
+// that tick places anything. Reporting by scheduled time alone therefore wrote
+// a work note claiming a call that was retired microseconds earlier and never
+// happened — an operational record has to say what was done, not what was
+// planned.
+//
+// cancelledAt, when non-nil, truncates the summary at an acknowledgement,
+// followed by a closing line counting what was dropped. reason names the
+// gesture that stopped it — which matters because there are two, and which one
+// fired says whether somebody changed the status or left a public comment.
+// Empty defaults to "Acknowledged", the wording the documented sample uses.
+func (p Plan) ExecutionSummary(placed []bool, cancelledAt *time.Time, reason string) []string {
 	const stamp = "2006-01-02 15:04:05"
 	lines := []string{
 		fmt.Sprintf("[%s][OK][Start : Notification Plan - %s][%s/%s]",
@@ -318,7 +335,8 @@ func (p Plan) ExecutionSummary(cancelledAt *time.Time, reason string) []string {
 		b := at(is.Level, is.At)
 		b.issues = append(b.issues, is)
 	}
-	for _, c := range p.Calls {
+	for i, c := range p.Calls {
+		c.index = i
 		b := at(c.Level, c.At)
 		b.calls = append(b.calls, c)
 	}
@@ -346,25 +364,25 @@ func (p Plan) ExecutionSummary(cancelledAt *time.Time, reason string) []string {
 		// the attempt that placed them, not flat under the level.
 		for _, ord := range attemptOrdinals(b.calls) {
 			var due time.Time
-			var placed []PlannedCall
+			var dialled []PlannedCall
 			for _, c := range b.calls {
 				if c.Ordinal != ord {
 					continue
 				}
-				if cancelledAt != nil && !c.At.Before(*cancelledAt) {
+				if !wasPlaced(placed, c, cancelledAt) {
 					continue
 				}
 				if due.IsZero() || c.At.Before(due) {
 					due = c.At
 				}
-				placed = append(placed, c)
+				dialled = append(dialled, c)
 			}
-			if len(placed) == 0 {
+			if len(dialled) == 0 {
 				continue
 			}
 			lines = append(lines, fmt.Sprintf("[%s][OK][%s][Start : Notification Attempt]",
 				due.Format(stamp), b.level))
-			for _, c := range placed {
+			for _, c := range dialled {
 				lines = append(lines, fmt.Sprintf("[%s][%s][OK][Call][%s][%s]",
 					c.At.Format(stamp), c.Level, c.Recipient.Email, c.Recipient.Phone))
 			}
@@ -375,23 +393,50 @@ func (p Plan) ExecutionSummary(cancelledAt *time.Time, reason string) []string {
 		if reason == "" {
 			reason = "Acknowledged"
 		}
+		// Counted the same way the lines above are listed, or the two
+		// disagree: a call due at the very instant of the cancellation is
+		// retired before it is placed, so it is neither dialled nor "still
+		// scheduled", and counting by time alone lost it from both totals.
+		dropped := 0
+		for i := range p.Calls {
+			if !wasPlaced(placed, p.Calls[i].withIndex(i), cancelledAt) {
+				dropped++
+			}
+		}
 		lines = append(lines, fmt.Sprintf("[%s][OK][%s : %d call(s) cancelled]",
-			cancelledAt.Format(stamp), reason, len(p.Remaining(*cancelledAt))))
+			cancelledAt.Format(stamp), reason, dropped))
 	}
 	return lines
 }
 
 // WorkNote renders the execution summary as the work note section 11.0
 // specifies, heading and all, ready to PATCH onto the incident.
-func (p Plan) WorkNote(cancelledAt *time.Time, reason string) string {
+func (p Plan) WorkNote(placed []bool, cancelledAt *time.Time, reason string) string {
 	const stamp = "2006-01-02 15:04:05"
 	var b strings.Builder
 	b.WriteString("Execution Summary Of the Escalation Flow\n\n")
 	b.WriteString(fmt.Sprintf("Incident Created/Priority Updated time: %s\n\n",
 		p.Trigger.At.Format(stamp)))
 	b.WriteString("Execution Summary:\n\n")
-	b.WriteString(strings.Join(p.ExecutionSummary(cancelledAt, reason), "\n"))
+	b.WriteString(strings.Join(p.ExecutionSummary(placed, cancelledAt, reason), "\n"))
 	return b.String()
+}
+
+// withIndex returns a copy carrying its position in Plan.Calls, so wasPlaced
+// can look it up in the engine's flags.
+func (c PlannedCall) withIndex(i int) PlannedCall {
+	c.index = i
+	return c
+}
+
+// wasPlaced reports whether a call should appear in the summary as dialled.
+// With placed flags it is simply what the engine recorded; without them, the
+// best available approximation is "scheduled before the cancellation".
+func wasPlaced(placed []bool, c PlannedCall, cancelledAt *time.Time) bool {
+	if placed != nil {
+		return c.index < len(placed) && placed[c.index]
+	}
+	return cancelledAt == nil || c.At.Before(*cancelledAt)
 }
 
 // attemptOrdinals lists the distinct attempt ordinals present in calls, in

@@ -45,6 +45,15 @@
 // explicit --to (so it cannot page whoever a real roster points at), and it
 // refuses to start at all if the plan is larger than --max-calls.
 //
+// A ladder outlives the process that started it — that is what the durable
+// state is for — so an interrupted run can leave one in Redis that the next
+// run's engine resumes and keeps dialling. This retires its own ladder on the
+// way out, and that works when the signal actually reaches it: `go run` does
+// not forward one to the child process it spawns, so an interrupted `go run`
+// CAN orphan a ladder even though the compiled binary handles the same signal
+// correctly. --cleanup retires anything left behind, and is worth running
+// before any --live session.
+//
 // Usage:
 //
 //	# dry run of the whole flow, one ladder minute per second
@@ -97,6 +106,8 @@ type config struct {
 	redisAddr   string
 	incidentID  string
 	showTwiML   bool
+	keep        bool
+	cleanup     bool
 }
 
 func main() {
@@ -136,6 +147,10 @@ func run() error {
 			"       The ladder keeps its state there, so this tool needs one running:\n"+
 			"           docker run --rm -p 6379:6379 redis\n"+
 			"       underlying error: %w", cfg.redisAddr, err)
+	}
+
+	if cfg.cleanup {
+		return cleanupLocalLadders(ctx, escalation.NewStore(rdb), rdb)
 	}
 
 	twilio, recorder, closeTwilio, err := buildTwilioClient(cfg)
@@ -181,8 +196,21 @@ func run() error {
 			len(st.Plan.Calls), cfg.maxCalls)
 	}
 
+	// A ladder outlives the process that started it — that is the whole point
+	// of the durable state — so an interrupted run leaves one in Redis that
+	// the NEXT run's engine will happily resume and keep dialling. Harmless in
+	// a dry run, genuinely dangerous with --live. Always retire it on the way
+	// out unless resumption is what is being tested.
+	if !cfg.keep {
+		defer func() {
+			if err := retireLadder(context.Background(), escalation.NewStore(rdb), cfg.incidentID); err != nil {
+				fmt.Fprintf(os.Stderr, "warning: could not retire ladder %s: %v\n", cfg.incidentID, err)
+			}
+		}()
+	}
+
 	printHeader(cfg, st.Plan, trigger, to)
-	return runTicks(ctx, cfg, engine, rdb, trigger, recorder)
+	return runTicks(ctx, cfg, engine, rdb, trigger, recorder, st.Plan)
 }
 
 func parseFlags() config {
@@ -202,6 +230,8 @@ func parseFlags() config {
 	flag.StringVar(&cfg.redisAddr, "redis", envOr("REDIS_ADDR", "localhost:6379"), "Redis address holding the ladder state")
 	flag.StringVar(&cfg.incidentID, "incident-id", "", "incident id to use; defaults to a fresh one per run")
 	flag.BoolVar(&cfg.showTwiML, "show-twiml", false, "print the TwiML document of each call (dry runs only)")
+	flag.BoolVar(&cfg.keep, "keep", false, "leave this run's ladder in Redis on exit, so a later run resumes it (for testing resumption)")
+	flag.BoolVar(&cfg.cleanup, "cleanup", false, "retire every ladder this tool has left in Redis, then exit")
 	flag.Parse()
 	return cfg
 }
@@ -368,7 +398,7 @@ func envelope(entityID string, t events.Type, payload any) eventbus.Record {
 
 // runTicks drives the engine's own Tick on the compressed clock and fires the
 // acknowledgement part-way when asked.
-func runTicks(ctx context.Context, cfg config, engine *escalation.Engine, rdb *redis.Client, trigger time.Time, rec *callRecorder) error {
+func runTicks(ctx context.Context, cfg config, engine *escalation.Engine, rdb *redis.Client, trigger time.Time, rec *callRecorder, plan escalation.Plan) error {
 	fmt.Printf("\n  running (ctrl-c to stop)...\n\n")
 	store := escalation.NewStore(rdb)
 	ticker := time.NewTicker(cfg.tick)
@@ -376,18 +406,30 @@ func runTicks(ctx context.Context, cfg config, engine *escalation.Engine, rdb *r
 
 	realStart := time.Now()
 	cancelled := false
+	var cancelledAtLadderTime *time.Time
+	// The engine deletes a ladder's state the moment it finishes or is
+	// acknowledged, so the placed flags have to be kept as they are observed —
+	// otherwise the summary falls back to "everything scheduled before the
+	// cancellation", which over-reports exactly the calls the cancellation
+	// retired.
+	var lastPlaced []bool
 	seen := 0
 
 	for {
 		select {
 		case <-ctx.Done():
 			fmt.Printf("\n  interrupted\n")
-			return summarise(context.Background(), cfg, store, rec)
+			return summarise(context.Background(), cfg, store, rec, plan, cancelledAtLadderTime, lastPlaced)
 		case <-ticker.C:
 			elapsed := time.Since(realStart)
 
+			// Ladder time, expanded back out from the compressed real clock.
+			now := trigger.Add(time.Duration(float64(elapsed) / float64(cfg.minute) * float64(time.Minute)))
+
 			if !cancelled && cfg.cancelAfter > 0 && elapsed >= cfg.cancelAfter {
 				cancelled = true
+				at := now
+				cancelledAtLadderTime = &at
 				gesture := "a public comment"
 				if cfg.cancelBy == "status" {
 					gesture = "a move out of NEW"
@@ -398,8 +440,6 @@ func runTicks(ctx context.Context, cfg config, engine *escalation.Engine, rdb *r
 				}
 			}
 
-			// Ladder time, expanded back out from the compressed real clock.
-			now := trigger.Add(time.Duration(float64(elapsed) / float64(cfg.minute) * float64(time.Minute)))
 			if err := engine.Tick(ctx, now); err != nil {
 				fmt.Printf("  [%7s] tick error: %v\n", short(elapsed), err)
 			}
@@ -413,8 +453,9 @@ func runTicks(ctx context.Context, cfg config, engine *escalation.Engine, rdb *r
 			}
 			if !found {
 				fmt.Printf("\n  the engine has finished with this incident and cleared its state\n")
-				return summarise(ctx, cfg, store, rec)
+				return summarise(ctx, cfg, store, rec, plan, cancelledAtLadderTime, lastPlaced)
 			}
+			lastPlaced = append(lastPlaced[:0], st.Placed...)
 			for i, done := range st.Placed {
 				if done && i >= seen {
 					c := st.Plan.Calls[i]
@@ -430,25 +471,38 @@ func runTicks(ctx context.Context, cfg config, engine *escalation.Engine, rdb *r
 
 // summarise prints what the engine would have written back to the incident as
 // a work note, plus what the Twilio client actually sent.
-func summarise(ctx context.Context, cfg config, store *escalation.Store, rec *callRecorder) error {
+func summarise(ctx context.Context, cfg config, store *escalation.Store, rec *callRecorder, plan escalation.Plan, localCancelledAt *time.Time, observedPlaced []bool) error {
 	count, twiml := rec.snapshot()
 
 	fmt.Printf("\n%s\n", strings.Repeat("-", 78))
 	fmt.Printf("Execution summary (this is the work note the engine writes back)\n")
 	fmt.Printf("%s\n", strings.Repeat("-", 78))
 
-	// If the ladder is still live (interrupted), render from its stored state;
-	// once finished, the engine has already cleared it and logged the summary.
+	// The plan captured at startup is what makes this printable at all: a
+	// ladder that finishes or is acknowledged has had its state deleted by the
+	// engine by now, so reading it back would show nothing. Cancellation
+	// details still come from the stored state when it is there, since only
+	// the engine knows when and why it stopped.
+	// An acknowledged ladder has had its state deleted by the engine before
+	// this runs, taking the cancellation with it — which is exactly the run
+	// whose summary matters most. Fall back to what this tool itself knows:
+	// when it sent the acknowledgement, and which gesture it used.
+	placed := observedPlaced
+	cancelledAt, reason := localCancelledAt, ""
+	if cancelledAt != nil {
+		reason = "Public comment added"
+		if cfg.cancelBy == "status" {
+			reason = "Acknowledged"
+		}
+	}
 	if st, found, err := store.Get(ctx, cfg.incidentID); err == nil && found {
-		var cancelledAt *time.Time
+		plan, placed = st.Plan, st.Placed
 		if st.Cancelled != nil {
-			cancelledAt = st.Cancelled
+			cancelledAt, reason = st.Cancelled, st.CancelReason
 		}
-		for _, line := range st.Plan.ExecutionSummary(cancelledAt, st.CancelReason) {
-			fmt.Println(line)
-		}
-	} else {
-		fmt.Println("(the engine finished and cleared its state; its summary is in the log above)")
+	}
+	for _, line := range plan.ExecutionSummary(placed, cancelledAt, reason) {
+		fmt.Println(line)
 	}
 
 	fmt.Printf("\n%d call(s) reached %s.\n", count,
@@ -485,6 +539,66 @@ func printHeader(cfg config, plan escalation.Plan, trigger time.Time, to string)
 	for _, is := range plan.Issues {
 		fmt.Printf("    %-9s %-8s %s %s\n", "", is.Level, is.Reason, is.Detail)
 	}
+}
+
+// retireLadder drops a ladder's outstanding calls and its state, so nothing
+// resumes it after this process exits.
+func retireLadder(ctx context.Context, store *escalation.Store, incidentID string) error {
+	st, found, err := store.Get(ctx, incidentID)
+	if err != nil || !found {
+		return err
+	}
+	var pending []string
+	for i, done := range st.Placed {
+		if !done {
+			pending = append(pending, fmt.Sprintf("%s|%d", incidentID, i))
+		}
+	}
+	if err := store.RemoveWakes(ctx, pending...); err != nil {
+		return err
+	}
+	return store.Delete(ctx, incidentID)
+}
+
+// cleanupLocalLadders retires every ladder this tool has ever left behind —
+// the escape hatch for a developer who interrupted a run before --keep existed,
+// or who used --keep and is now done with it.
+//
+// Scans the wake index by asking for everything due arbitrarily far in the
+// future, which is every member it holds, and acts only on this tool's own
+// incident ids so a real ladder sharing the Redis is never touched.
+func cleanupLocalLadders(ctx context.Context, store *escalation.Store, rdb *redis.Client) error {
+	members, err := store.DueMembers(ctx, time.Now().AddDate(10, 0, 0))
+	if err != nil {
+		return fmt.Errorf("scanning the wake index: %w", err)
+	}
+	ids := map[string]bool{}
+	for _, m := range members {
+		if i := strings.LastIndex(m, "|"); i > 0 && strings.HasPrefix(m[:i], "local-") {
+			ids[m[:i]] = true
+		}
+	}
+	// State keys can outlive their wake entries (every call placed, no
+	// cancellation), so sweep those too.
+	keys, err := rdb.Keys(ctx, "incident:escalation:state:local-*").Result()
+	if err != nil {
+		return fmt.Errorf("scanning ladder state: %w", err)
+	}
+	for _, k := range keys {
+		ids[strings.TrimPrefix(k, "incident:escalation:state:")] = true
+	}
+
+	if len(ids) == 0 {
+		fmt.Println("nothing to clean up: this tool has left no ladders in Redis")
+		return nil
+	}
+	for id := range ids {
+		if err := retireLadder(ctx, store, id); err != nil {
+			return fmt.Errorf("retiring %s: %w", id, err)
+		}
+		fmt.Printf("retired %s\n", id)
+	}
+	return nil
 }
 
 // short renders a duration without the noise of sub-second precision.

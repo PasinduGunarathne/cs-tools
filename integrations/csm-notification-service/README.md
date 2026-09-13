@@ -247,6 +247,16 @@ go run ./cmd/escalation-local -priority P0 -live -to +9477xxxxxxx -ssml \
     -cancel-after 10s
 ```
 
+A ladder outlives the process that started it, so an interrupted run can leave
+one in Redis that the next run resumes and keeps dialling. The tool retires its
+own on exit, but `go run` does not forward signals to the child it spawns, so an
+interrupted `go run` can still orphan one. `-cleanup` retires anything left
+behind — worth running before any `--live` session:
+
+```bash
+go run ./cmd/escalation-local -cleanup
+```
+
 `--live` needs `TWILIO_ACCOUNT_SID`/`TWILIO_AUTH_TOKEN`/`TWILIO_FROM_NUMBER` in
 `.env`, refuses to run without an explicit `--to` (so it can never page whoever
 a real roster points at), and refuses to start at all if the plan is larger than

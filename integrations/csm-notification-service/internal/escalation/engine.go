@@ -211,7 +211,7 @@ func (e *Engine) start(ctx context.Context, t Trigger, replace bool) error {
 	if len(plan.Calls) == 0 {
 		slog.WarnContext(ctx, "escalation: plan has no reachable recipients; nothing scheduled",
 			"incidentId", t.IncidentID, "priority", t.Priority)
-		return e.writeNote(ctx, plan, nil, "")
+		return e.writeNote(ctx, plan, nil, nil, "")
 	}
 
 	st := LadderState{Plan: plan, Placed: make([]bool, len(plan.Calls))}
@@ -311,7 +311,7 @@ func (e *Engine) cancelBy(ctx context.Context, incidentID string, reason cancelR
 			"incidentId", incidentID, "reason", string(reason), "cancelledCalls", len(pending))
 	}
 
-	if err := e.writeNote(ctx, st.Plan, st.Cancelled, st.CancelReason); err != nil {
+	if err := e.writeNote(ctx, st.Plan, st.Placed, st.Cancelled, st.CancelReason); err != nil {
 		return err
 	}
 	return e.store.Delete(ctx, incidentID)
@@ -378,7 +378,7 @@ func (e *Engine) processDue(ctx context.Context, member string) error {
 	if st.AllPlaced() {
 		// The ladder ran to its end without anyone acknowledging. Record what
 		// happened and stop tracking it.
-		if err := e.writeNote(ctx, st.Plan, nil, ""); err != nil {
+		if err := e.writeNote(ctx, st.Plan, st.Placed, nil, ""); err != nil {
 			return err
 		}
 		slog.WarnContext(ctx, "escalation: ladder exhausted without acknowledgement",
@@ -409,8 +409,8 @@ func (e *Engine) place(ctx context.Context, t Trigger, call PlannedCall) error {
 // With no entity-service client configured the summary is logged instead, so a
 // deployment without one still runs the ladder rather than failing every
 // record.
-func (e *Engine) writeNote(ctx context.Context, plan Plan, cancelledAt *time.Time, reason string) error {
-	note := plan.WorkNote(cancelledAt, reason)
+func (e *Engine) writeNote(ctx context.Context, plan Plan, placed []bool, cancelledAt *time.Time, reason string) error {
+	note := plan.WorkNote(placed, cancelledAt, reason)
 	if e.notes == nil {
 		slog.InfoContext(ctx, "escalation: no incident-notes client configured; execution summary not written back",
 			"incidentId", plan.Trigger.IncidentID)

@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -693,7 +694,84 @@ func TestNewEngine_NilNotesClientDoesNotPanic(t *testing.T) {
 		t.Fatal("a nil *EntityClient must leave the interface field nil, not hold a nil pointer")
 	}
 	// writeNote is the path that would panic; it must log and return instead.
-	if err := e.writeNote(context.Background(), Plan{}, nil, ""); err != nil {
+	if err := e.writeNote(context.Background(), Plan{}, nil, nil, ""); err != nil {
 		t.Errorf("writeNote with no client should be a no-op, got %v", err)
+	}
+}
+
+// The work note must report what was dialled, not what was scheduled.
+//
+// A cancellation and a call due at the same instant race, and the
+// cancellation wins — it drops the wake entries before that tick places
+// anything. Reporting by scheduled time alone wrote a summary claiming a call
+// that had been retired microseconds earlier and never happened, which was
+// found by running the engine on a compressed clock where that race is
+// common rather than vanishingly rare.
+func TestEngine_SummaryReportsOnlyCallsActuallyPlaced(t *testing.T) {
+	store, caller, notes := newMemStore(), &fakeCaller{}, &fakeNotes{}
+	e := testEngine(store, caller, notes, enabled())
+	at := ist(2026, 9, 9, 10, 0)
+	if err := e.Handle(context.Background(), createdEvent(t, "CRITICAL", at)); err != nil {
+		t.Fatal(err)
+	}
+	// Place the first two LEVEL_1 attempts (+6m, +8m), leaving the third
+	// (+10m) scheduled but not yet dialled.
+	if err := e.Tick(context.Background(), at.Add(9*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	placed := len(caller.placed)
+
+	// Acknowledge at an instant AFTER the third attempt's scheduled time, so
+	// a summary driven by scheduled time would list it even though the
+	// cancellation retired it first.
+	st, _, _ := store.Get(context.Background(), testIncidentID)
+	st.Cancelled = func() *time.Time { t := at.Add(30 * time.Minute); return &t }()
+	st.CancelReason = "Acknowledged"
+	if err := store.Save(context.Background(), testIncidentID, st); err != nil {
+		t.Fatal(err)
+	}
+
+	lines := st.Plan.ExecutionSummary(st.Placed, st.Cancelled, st.CancelReason)
+	calls := 0
+	for _, l := range lines {
+		if strings.Contains(l, "[OK][Call]") {
+			calls++
+		}
+	}
+	if calls != placed {
+		t.Errorf("summary reports %d calls, but only %d were placed:\n%s",
+			calls, placed, strings.Join(lines, "\n"))
+	}
+
+	// The closing count has to agree with the lines: every call is either
+	// dialled or cancelled, and a call due at the cancellation instant used to
+	// fall out of both totals.
+	dropped := 0
+	for _, l := range lines {
+		if !strings.Contains(l, "call(s) cancelled]") {
+			continue
+		}
+		for _, f := range strings.Fields(l) {
+			if n, err := strconv.Atoi(f); err == nil {
+				dropped = n
+			}
+		}
+	}
+	if calls+dropped != len(st.Plan.Calls) {
+		t.Errorf("%d dialled + %d cancelled = %d, but the plan has %d calls",
+			calls, dropped, calls+dropped, len(st.Plan.Calls))
+	}
+
+	// Without the flags the old approximation still applies, for a caller
+	// that genuinely has no engine (cmd/ladder-harness).
+	approx := st.Plan.ExecutionSummary(nil, st.Cancelled, st.CancelReason)
+	approxCalls := 0
+	for _, l := range approx {
+		if strings.Contains(l, "[OK][Call]") {
+			approxCalls++
+		}
+	}
+	if approxCalls <= calls {
+		t.Errorf("expected the flag-less approximation to over-report; got %d vs %d", approxCalls, calls)
 	}
 }
