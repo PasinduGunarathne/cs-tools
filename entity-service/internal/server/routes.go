@@ -100,6 +100,16 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, service.Even
 		scheduledTaskRunHandler = handler.NewScheduledTaskRunHandler(service.NewScheduledTaskRunService(repository.NewScheduledTaskRunRepository(db)))
 	}
 
+	// alert_incident_mapping has no ServiceNow equivalent either — same
+	// reasoning as sla_clocks/scheduled_task_run/event_publish_failures above,
+	// gated the same way: nil db means nil handler means the routes below are
+	// never registered, rather than panicking on a nil pool.
+	var alertIncidentMappingHandler *handler.AlertIncidentMappingHandler
+	if db != nil {
+		alertIncidentMappingRepo := repository.NewAlertIncidentMappingRepository(db)
+		alertIncidentMappingHandler = handler.NewAlertIncidentMappingHandler(service.NewAlertIncidentMappingService(alertIncidentMappingRepo))
+	}
+
 	accountRepo := repository.NewAccountRepository(db)
 	accountHandler := handler.NewAccountHandler(service.NewAccountService(accountRepo))
 
@@ -118,10 +128,14 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, service.Even
 		snAccountHandler = handler.NewSNAccountHandler(service.NewServiceNowAccountService(serviceNowIntegrationServiceClient))
 	}
 
-	var accountContactHandler *handler.AccountContactHandler
+	accountContactRepo := repository.NewAccountContactRepository(db)
+	var activeAccountContactSvc service.AccountContactService
 	if cfg.DataSource == config.DataSourceServiceNow {
-		accountContactHandler = handler.NewAccountContactHandler(service.NewServiceNowAccountContactService(serviceNowIntegrationServiceClient))
+		activeAccountContactSvc = service.NewServiceNowAccountContactService(serviceNowIntegrationServiceClient)
+	} else {
+		activeAccountContactSvc = service.NewAccountContactService(accountContactRepo)
 	}
+	accountContactHandler := handler.NewAccountContactHandler(activeAccountContactSvc)
 
 	projectRepo := repository.NewProjectRepository(db)
 	pgProjectSvc := service.NewProjectService(projectRepo)
@@ -133,10 +147,14 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, service.Even
 	}
 	projectHandler := handler.NewProjectHandler(activeProjectSvc)
 
-	var projectContactHandler *handler.ProjectContactHandler
+	projectContactRepo := repository.NewProjectContactRepository(db)
+	var activeProjectContactSvc service.ProjectContactService
 	if cfg.DataSource == config.DataSourceServiceNow {
-		projectContactHandler = handler.NewProjectContactHandler(service.NewServiceNowProjectContactService(serviceNowIntegrationServiceClient))
+		activeProjectContactSvc = service.NewServiceNowProjectContactService(serviceNowIntegrationServiceClient)
+	} else {
+		activeProjectContactSvc = service.NewProjectContactService(projectContactRepo)
 	}
+	projectContactHandler := handler.NewProjectContactHandler(activeProjectContactSvc)
 
 	var projectUpdateHandler *handler.ProjectUpdateHandler
 	if cfg.DataSource == config.DataSourceServiceNow {
@@ -195,10 +213,10 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, service.Even
 	}
 
 	caseRepo := repository.NewCaseRepository(db)
-	pgCaseSvc := service.NewCaseService(caseRepo, userRepo)
+	pgCaseSvc := service.NewCaseService(caseRepo, userRepo, eventPublisher)
 	var activeCaseSvc service.CaseService
 	if cfg.DataSource == config.DataSourceServiceNow {
-		activeCaseSvc = service.NewServiceNowCaseService(serviceNowIntegrationServiceClient, pgCaseSvc, eventPublisher, slaClockService, snUserService, cfg.SupportEngineerRole)
+		activeCaseSvc = service.NewServiceNowCaseService(serviceNowIntegrationServiceClient, pgCaseSvc, eventPublisher, slaClockService, snUserService, cfg.SupportEngineerRole, cfg.CustomerRoles)
 	} else {
 		activeCaseSvc = pgCaseSvc
 	}
@@ -214,15 +232,26 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, service.Even
 		caseGithubIssueHandler = handler.NewCaseGithubIssueHandler(service.NewServiceNowCaseGithubIssueService(serviceNowIntegrationServiceClient, activeCaseSvc))
 	}
 
+	var caseEscalationHandler *handler.CaseEscalationHandler
+	if cfg.DataSource == config.DataSourceServiceNow {
+		caseEscalationHandler = handler.NewCaseEscalationHandler(
+			service.NewCaseEscalationService(service.NewServiceNowEscalationService(serviceNowIntegrationServiceClient), activeCaseSvc),
+		)
+	}
+
 	var changeRequestHandler *handler.ChangeRequestHandler
 	if cfg.DataSource == config.DataSourceServiceNow {
 		changeRequestHandler = handler.NewChangeRequestHandler(service.NewServiceNowChangeRequestService(serviceNowIntegrationServiceClient))
 	}
 
-	var timeCardHandler *handler.TimeCardHandler
+	timeCardRepo := repository.NewTimeCardRepository(db)
+	var activeTimeCardSvc service.TimeCardService
 	if cfg.DataSource == config.DataSourceServiceNow {
-		timeCardHandler = handler.NewTimeCardHandler(service.NewServiceNowTimeCardService(serviceNowIntegrationServiceClient))
+		activeTimeCardSvc = service.NewServiceNowTimeCardService(serviceNowIntegrationServiceClient)
+	} else {
+		activeTimeCardSvc = service.NewTimeCardService(timeCardRepo, userRepo)
 	}
+	timeCardHandler := handler.NewTimeCardHandler(activeTimeCardSvc)
 
 	var catalogHandler *handler.CatalogHandler
 	if cfg.DataSource == config.DataSourceServiceNow {
@@ -234,10 +263,14 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, service.Even
 		feedbackHandler = handler.NewFeedbackHandler(service.NewServiceNowFeedbackService(serviceNowIntegrationServiceClient))
 	}
 
-	var productVulnerabilityHandler *handler.ProductVulnerabilityHandler
+	productVulnerabilityRepo := repository.NewProductVulnerabilityRepository(db)
+	var activeProductVulnerabilitySvc service.ProductVulnerabilityService
 	if cfg.DataSource == config.DataSourceServiceNow {
-		productVulnerabilityHandler = handler.NewProductVulnerabilityHandler(service.NewServiceNowProductVulnerabilityService(serviceNowIntegrationServiceClient))
+		activeProductVulnerabilitySvc = service.NewServiceNowProductVulnerabilityService(serviceNowIntegrationServiceClient)
+	} else {
+		activeProductVulnerabilitySvc = service.NewProductVulnerabilityService(productVulnerabilityRepo)
 	}
+	productVulnerabilityHandler := handler.NewProductVulnerabilityHandler(activeProductVulnerabilitySvc)
 
 	var incidentHandler *handler.IncidentHandler
 	if cfg.DataSource == config.DataSourceServiceNow {
@@ -304,10 +337,14 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, service.Even
 		configurationItemHandler = handler.NewConfigurationItemHandler(service.NewServiceNowConfigurationItemService(serviceNowIntegrationServiceClient))
 	}
 
-	var commentHandler *handler.CommentHandler
+	commentRepo := repository.NewCommentRepository(db)
+	var activeCommentSvc service.CommentService
 	if cfg.DataSource == config.DataSourceServiceNow {
-		commentHandler = handler.NewCommentHandler(service.NewServiceNowCommentService(serviceNowIntegrationServiceClient, eventPublisher))
+		activeCommentSvc = service.NewServiceNowCommentService(serviceNowIntegrationServiceClient, eventPublisher)
+	} else {
+		activeCommentSvc = service.NewCommentService(commentRepo, userRepo)
 	}
+	commentHandler := handler.NewCommentHandler(activeCommentSvc)
 
 	var taskSlaHandler *handler.TaskSlaHandler
 	if cfg.DataSource == config.DataSourceServiceNow {
@@ -336,12 +373,12 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, service.Even
 
 	mux.HandleFunc("GET /health", handler.HealthCheck)
 
-	// event_publish_failures, sla_clocks and scheduled_task_run are not
-	// data-source specific, but all three are Postgres-backed, and the
-	// database is optional when DATA_SOURCE=servicenow — so unlike the role
-	// catalogue and team registry below, these are registered only when a
-	// pool exists. With no database they 404 rather than panicking on a nil
-	// pool.
+	// event_publish_failures, sla_clocks, scheduled_task_run and
+	// alert_incident_mapping are not data-source specific, but all four are
+	// Postgres-backed, and the database is optional when
+	// DATA_SOURCE=servicenow — so unlike the role catalogue and team
+	// registry below, these are registered only when a pool exists. With no
+	// database they 404 rather than panicking on a nil pool.
 	if eventPublishFailureHandler != nil {
 		mux.HandleFunc("POST /event-publish-failures", eventPublishFailureHandler.CreateEventPublishFailure)
 		mux.HandleFunc("POST /event-publish-failures/search", eventPublishFailureHandler.SearchEventPublishFailures)
@@ -357,6 +394,10 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, service.Even
 		mux.HandleFunc("PATCH /scheduled-tasks/attempts/{id}", scheduledTaskRunHandler.UpdateScheduledTaskRunAttempt)
 		mux.HandleFunc("GET /scheduled-tasks/attempts", scheduledTaskRunHandler.ListScheduledTaskRuns)
 		mux.HandleFunc("DELETE /scheduled-tasks/attempts", scheduledTaskRunHandler.DeleteScheduledTaskRuns)
+	}
+	if alertIncidentMappingHandler != nil {
+		mux.HandleFunc("POST /alert-incident-mappings", alertIncidentMappingHandler.CreateAlertIncidentMapping)
+		mux.HandleFunc("POST /alert-incident-mappings/lookup", alertIncidentMappingHandler.LookupAlertIncidentMappings)
 	}
 
 	if snUserHandler != nil {
@@ -375,15 +416,11 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, service.Even
 		mux.HandleFunc("GET /accounts/{id}", accountHandler.GetAccount)
 		mux.HandleFunc("POST /accounts/search", accountHandler.SearchAccounts)
 	}
-	if accountContactHandler != nil {
-		mux.HandleFunc("POST /accounts/{id}/contacts/search", accountContactHandler.SearchAccountContacts)
-	}
+	mux.HandleFunc("POST /accounts/{id}/contacts/search", accountContactHandler.SearchAccountContacts)
 	mux.HandleFunc("GET /projects/{id}", projectHandler.GetProject)
 	mux.HandleFunc("POST /projects/search", projectHandler.SearchProjects)
-	if projectContactHandler != nil {
-		mux.HandleFunc("POST /projects/{id}/contacts/search", projectContactHandler.SearchProjectContacts)
-		mux.HandleFunc("GET /projects/{id}/contacts/{contactId}", projectContactHandler.GetProjectContact)
-	}
+	mux.HandleFunc("POST /projects/{id}/contacts/search", projectContactHandler.SearchProjectContacts)
+	mux.HandleFunc("GET /projects/{id}/contacts/{contactId}", projectContactHandler.GetProjectContact)
 	if projectUpdateHandler != nil {
 		mux.HandleFunc("PATCH /projects/{id}", projectUpdateHandler.UpdateProject)
 	}
@@ -455,6 +492,11 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, service.Even
 		mux.HandleFunc("POST /cases/{id}/github-issues", caseGithubIssueHandler.CreateCaseGithubIssue)
 	}
 
+	if caseEscalationHandler != nil {
+		mux.HandleFunc("GET /cases/{id}/escalations", caseEscalationHandler.SearchCaseEscalations)
+		mux.HandleFunc("POST /cases/{id}/escalations", caseEscalationHandler.CreateCaseEscalation)
+	}
+
 	if changeRequestHandler != nil {
 		mux.HandleFunc("POST /change-requests", changeRequestHandler.CreateChangeRequest)
 		mux.HandleFunc("POST /change-requests/search", changeRequestHandler.SearchChangeRequests)
@@ -465,25 +507,21 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, service.Even
 		mux.HandleFunc("POST /change-requests/{id}/approvals/decision", changeRequestHandler.DecideChangeRequestApproval)
 	}
 
-	if timeCardHandler != nil {
-		mux.HandleFunc("POST /time-cards/search", timeCardHandler.SearchTimeCards)
-		mux.HandleFunc("POST /time-cards", timeCardHandler.CreateTimeCard)
-		mux.HandleFunc("PATCH /time-cards/{id}", timeCardHandler.UpdateTimeCard)
-		mux.HandleFunc("POST /cases/time-cards/search", timeCardHandler.SearchCaseTimeCards)
-		mux.HandleFunc("DELETE /time-cards/{id}", timeCardHandler.DeleteTimeCard)
-	}
+	mux.HandleFunc("POST /time-cards/search", timeCardHandler.SearchTimeCards)
+	mux.HandleFunc("POST /time-cards", timeCardHandler.CreateTimeCard)
+	mux.HandleFunc("PATCH /time-cards/{id}", timeCardHandler.UpdateTimeCard)
+	mux.HandleFunc("POST /cases/time-cards/search", timeCardHandler.SearchCaseTimeCards)
+	mux.HandleFunc("DELETE /time-cards/{id}", timeCardHandler.DeleteTimeCard)
 
 	if catalogHandler != nil {
 		mux.HandleFunc("POST /catalogs/search", catalogHandler.SearchCatalogs)
 		mux.HandleFunc("GET /catalogs/{catalogId}/items/{catalogItemId}/variables", catalogHandler.GetCatalogItemVariables)
 	}
 
-	if productVulnerabilityHandler != nil {
-		mux.HandleFunc("POST /products/vulnerabilities/search", productVulnerabilityHandler.SearchProductVulnerabilities)
-		mux.HandleFunc("GET /products/vulnerabilities/{id}", productVulnerabilityHandler.GetProductVulnerability)
-		mux.HandleFunc("GET /products/vulnerabilities/meta", productVulnerabilityHandler.GetVulnerabilityMeta)
-		mux.HandleFunc("POST /products/vulnerabilities/sync", productVulnerabilityHandler.SyncProductVulnerabilities)
-	}
+	mux.HandleFunc("POST /products/vulnerabilities/search", productVulnerabilityHandler.SearchProductVulnerabilities)
+	mux.HandleFunc("GET /products/vulnerabilities/{id}", productVulnerabilityHandler.GetProductVulnerability)
+	mux.HandleFunc("GET /products/vulnerabilities/meta", productVulnerabilityHandler.GetVulnerabilityMeta)
+	mux.HandleFunc("POST /products/vulnerabilities/sync", productVulnerabilityHandler.SyncProductVulnerabilities)
 
 	if itServiceHandler != nil {
 		mux.HandleFunc("POST /services/search", itServiceHandler.SearchITServices)
@@ -501,10 +539,8 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, service.Even
 		mux.HandleFunc("POST /configuration-items/search", configurationItemHandler.SearchConfigurationItems)
 	}
 
-	if commentHandler != nil {
-		mux.HandleFunc("POST /comments", commentHandler.CreateComment)
-		mux.HandleFunc("POST /comments/search", commentHandler.SearchComments)
-	}
+	mux.HandleFunc("POST /comments", commentHandler.CreateComment)
+	mux.HandleFunc("POST /comments/search", commentHandler.SearchComments)
 
 	if taskSlaHandler != nil {
 		mux.HandleFunc("GET /slas/{id}", taskSlaHandler.GetTaskSla)

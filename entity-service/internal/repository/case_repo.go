@@ -52,10 +52,24 @@ type CaseRepository interface {
 	// SearchCaseComments returns a paginated slice of comments for the given case
 	// together with the total count of matching rows before pagination.
 	SearchCaseComments(ctx context.Context, req domain.SearchCaseCommentsRequest) ([]domain.CaseComment, int, error)
-	// UpdateCase updates the state and/or priority of the case identified by req.ID.
-	// closed_at is set to NOW() when transitioning to closed.
+	// UpdateCase updates the state and/or priority of the case identified by
+	// req.ID. closed_at is set to NOW() when transitioning to closed.
+	//
+	// previousSeverity is the case's severity as it stood immediately before
+	// this update. When req.Severity is nil, severity can't have changed at
+	// all, so this just equals the returned domain.Case.Severity — no extra
+	// work needed. When req.Severity is set, this runs inside a transaction
+	// that locks the row (SELECT ... FOR UPDATE) before reading its prior
+	// severity and applying the update, so previousSeverity is accurate even
+	// under a concurrent update to the same case: a plain separate
+	// read-then-write (what this used to do) could either miss a genuine
+	// LOW-severity-boundary crossing or double-detect one, depending on how
+	// two concurrent updates interleave — see caseService.
+	// detectBillableStatusChange, the sole caller that needs this value, and
+	// the CodeRabbit finding on PR #1683 this fixes.
+	//
 	// Returns a NotFoundError if no matching row exists.
-	UpdateCase(ctx context.Context, req domain.UpdateCaseRequest) (domain.Case, error)
+	UpdateCase(ctx context.Context, req domain.UpdateCaseRequest) (c domain.Case, previousSeverity domain.CaseSeverity, err error)
 	// CreateCaseAttachment inserts a new attachment metadata row for the case
 	// identified by req.ReferenceID. req.StorageKey must be non-nil: this data
 	// source stores file bytes externally in SFTPGo, never inline in Postgres.
@@ -84,6 +98,36 @@ type CaseRepository interface {
 	// already resolved the row via GetCaseAttachmentByID and any mismatch
 	// here means it changed state concurrently.
 	ConfirmCaseAttachment(ctx context.Context, id string) (domain.Attachment, error)
+	// AddCaseTag finds or creates a tag named label (case-insensitively) and
+	// attaches it to the case's underlying work_item, unless it is already
+	// attached (idempotent: a second call for an already-attached label
+	// returns the existing tag, not an error). callerEmail is recorded as
+	// created_by/updated_by; the "no fine-grained ACL beyond authenticated
+	// caller" model matches caseRepo's existing convention -- callerEmail
+	// is threaded down to this layer against a future authorization
+	// decision, not checked here yet. Returns a ValidationError if caseID
+	// does not reference an existing case.
+	AddCaseTag(ctx context.Context, caseID, label, callerEmail string) (domain.Tag, error)
+	// RemoveCaseTag detaches the tag identified by tagID from the case
+	// identified by caseID. Returns a NotFoundError if that pairing does
+	// not exist (the tag might exist but not be on this case, or not exist
+	// at all -- both are "not found" from the caller's perspective).
+	RemoveCaseTag(ctx context.Context, caseID, tagID, callerEmail string) error
+	// SearchTags returns tags (not scoped to any case) whose name matches
+	// searchQuery case-insensitively (all tags when searchQuery is empty),
+	// most recently created first, capped at limit. callerEmail is threaded
+	// down for the same future-authorization reason as AddCaseTag; tags are
+	// global vocabulary with no per-case or per-caller scope today.
+	SearchTags(ctx context.Context, searchQuery, callerEmail string, limit int) ([]domain.Tag, error)
+	// SetCaseWatchList replaces the case's watch list (work_item_watcher
+	// rows keyed by the case's own id, which is also its work_item id)
+	// wholesale with userIDs, and bumps the case's underlying work_item
+	// row's updated_on/updated_by the same way every other UpdateCase
+	// branch does -- callerEmail is that updated_by. Returns the resolved
+	// watcher list and the new updated_on. Returns a NotFoundError if
+	// caseID does not exist; a ValidationError if any userID does not
+	// exist.
+	SetCaseWatchList(ctx context.Context, caseID string, userIDs []string, callerEmail string) ([]domain.WatchListUser, time.Time, error)
 }
 
 type caseRepo struct {
@@ -222,6 +266,11 @@ func (r *caseRepo) GetCaseByID(ctx context.Context, id string) (domain.CaseView,
 	if rcID != nil {
 		cv.RelatedCase = &domain.CaseNumberRef{ID: *rcID, Number: *rcNum}
 	}
+	watchers, err := fetchCaseWatchers(ctx, r.db, id)
+	if err != nil {
+		return domain.CaseView{}, err
+	}
+	cv.WatchList = watchers
 	return cv, nil
 }
 
@@ -323,8 +372,39 @@ func (r *caseRepo) SearchCaseComments(ctx context.Context, req domain.SearchCase
 	return comments, total, nil
 }
 
+// updateCaseQuery is shared by both branches of UpdateCase below.
+const updateCaseQuery = `
+	UPDATE cases
+	SET state      = CASE WHEN $2 <> '' THEN $2::case_state_enum ELSE state END,
+	    severity   = CASE WHEN $3 <> '' THEN $3::case_severity_enum ELSE severity END,
+	    work_state = CASE WHEN $4 <> '' THEN $4::case_work_state_enum ELSE work_state END,
+	    updated_at = NOW(),
+	    closed_at  = CASE WHEN $2 = 'closed' THEN NOW() WHEN $2 <> '' AND $2 <> 'closed' THEN NULL ELSE closed_at END
+	WHERE id = $1
+	RETURNING id, number, internal_id, created_by, project_id, deployment_id, deployed_product_id,
+	          subject, description, severity, issue_type, state, work_state, created_at, updated_at, closed_at`
+
+// scanUpdatedCase is shared by both branches of UpdateCase below.
+func scanUpdatedCase(row pgx.Row) (domain.Case, error) {
+	var c domain.Case
+	var workStateRaw *string
+	if err := row.Scan(
+		&c.ID, &c.Number, &c.InternalID, &c.CreatedBy,
+		&c.ProjectID, &c.DeploymentID, &c.DeployedProductID,
+		&c.Subject, &c.Description, &c.Severity, &c.IssueType, &c.State, &workStateRaw,
+		&c.CreatedOn, &c.UpdatedOn, &c.ClosedOn,
+	); err != nil {
+		return domain.Case{}, err
+	}
+	if workStateRaw != nil {
+		ws := domain.CaseWorkState(*workStateRaw)
+		c.WorkState = &ws
+	}
+	return c, nil
+}
+
 // UpdateCase implements CaseRepository.
-func (r *caseRepo) UpdateCase(ctx context.Context, req domain.UpdateCaseRequest) (domain.Case, error) {
+func (r *caseRepo) UpdateCase(ctx context.Context, req domain.UpdateCaseRequest) (domain.Case, domain.CaseSeverity, error) {
 	state := ""
 	if req.State != nil {
 		state = string(*req.State)
@@ -337,36 +417,47 @@ func (r *caseRepo) UpdateCase(ctx context.Context, req domain.UpdateCaseRequest)
 	if req.WorkState != nil {
 		workState = string(*req.WorkState)
 	}
-	const query = `
-		UPDATE cases
-		SET state      = CASE WHEN $2 <> '' THEN $2::case_state_enum ELSE state END,
-		    severity   = CASE WHEN $3 <> '' THEN $3::case_severity_enum ELSE severity END,
-		    work_state = CASE WHEN $4 <> '' THEN $4::case_work_state_enum ELSE work_state END,
-		    updated_at = NOW(),
-		    closed_at  = CASE WHEN $2 = 'closed' THEN NOW() WHEN $2 <> '' AND $2 <> 'closed' THEN NULL ELSE closed_at END
-		WHERE id = $1
-		RETURNING id, number, internal_id, created_by, project_id, deployment_id, deployed_product_id,
-		          subject, description, severity, issue_type, state, work_state, created_at, updated_at, closed_at`
 
-	var c domain.Case
-	var workStateRaw *string
-	err := r.db.QueryRow(ctx, query, req.ID, state, severity, workState).Scan(
-		&c.ID, &c.Number, &c.InternalID, &c.CreatedBy,
-		&c.ProjectID, &c.DeploymentID, &c.DeployedProductID,
-		&c.Subject, &c.Description, &c.Severity, &c.IssueType, &c.State, &workStateRaw,
-		&c.CreatedOn, &c.UpdatedOn, &c.ClosedOn,
-	)
+	// req.Severity == nil: severity can't change, so there's nothing to
+	// race on — skip the transaction/lock overhead entirely.
+	if req.Severity == nil {
+		c, err := scanUpdatedCase(r.db.QueryRow(ctx, updateCaseQuery, req.ID, state, severity, workState))
+		if errors.Is(err, pgx.ErrNoRows) {
+			return domain.Case{}, "", &apierror.NotFoundError{Msg: "case not found"}
+		}
+		if err != nil {
+			return domain.Case{}, "", fmt.Errorf("update case: %w", err)
+		}
+		return c, c.Severity, nil
+	}
+
+	// req.Severity != nil: lock the row first so the previous severity this
+	// returns is accurate even under a concurrent update to the same case —
+	// see this method's own interface doc comment for why that matters.
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return domain.Case{}, "", fmt.Errorf("update case: begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var previousSeverity domain.CaseSeverity
+	err = tx.QueryRow(ctx, `SELECT severity FROM cases WHERE id = $1 FOR UPDATE`, req.ID).Scan(&previousSeverity)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return domain.Case{}, &apierror.NotFoundError{Msg: "case not found"}
+		return domain.Case{}, "", &apierror.NotFoundError{Msg: "case not found"}
 	}
 	if err != nil {
-		return domain.Case{}, fmt.Errorf("update case: %w", err)
+		return domain.Case{}, "", fmt.Errorf("update case: lock row: %w", err)
 	}
-	if workStateRaw != nil {
-		ws := domain.CaseWorkState(*workStateRaw)
-		c.WorkState = &ws
+
+	c, err := scanUpdatedCase(tx.QueryRow(ctx, updateCaseQuery, req.ID, state, severity, workState))
+	if err != nil {
+		return domain.Case{}, "", fmt.Errorf("update case: %w", err)
 	}
-	return c, nil
+
+	if err := tx.Commit(ctx); err != nil {
+		return domain.Case{}, "", fmt.Errorf("update case: commit tx: %w", err)
+	}
+	return c, previousSeverity, nil
 }
 
 // CreateCaseAttachment implements CaseRepository.
@@ -829,4 +920,218 @@ func (r *caseRepo) SearchCases(ctx context.Context, req domain.SearchCasesReques
 	}
 
 	return cases, total, nil
+}
+
+// rowsQuerier is satisfied by both *pgxpool.Pool and pgx.Tx, letting
+// fetchCaseWatchers run either directly against the pool (GetCaseByID) or
+// inside an existing transaction (SetCaseWatchList), without duplicating the
+// query.
+type rowsQuerier interface {
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+}
+
+// fetchCaseWatchers reads the resolved watch list for the case (== work_item)
+// identified by caseID, newest-added-last ordering is not available (see
+// work_item_watcher's own migration comment: no per-row audit trail to sort
+// by), so results are ordered by user_name for a stable, deterministic
+// response instead.
+func fetchCaseWatchers(ctx context.Context, q rowsQuerier, caseID string) ([]domain.WatchListUser, error) {
+	rows, err := q.Query(ctx, `
+		SELECT u.id, u.user_name, COALESCE(u.name, CONCAT_WS(' ', u.first_name, u.last_name)), u.email
+		FROM work_item_watcher w
+		JOIN "user" u ON u.id = w.user_id
+		WHERE w.work_item_id = $1
+		ORDER BY u.user_name`, caseID)
+	if err != nil {
+		return nil, fmt.Errorf("query case watch list: %w", err)
+	}
+	defer rows.Close()
+
+	var watchers []domain.WatchListUser
+	for rows.Next() {
+		var id, userName, name, email string
+		if err := rows.Scan(&id, &userName, &name, &email); err != nil {
+			return nil, fmt.Errorf("scan case watcher: %w", err)
+		}
+		watchers = append(watchers, domain.WatchListUser{
+			ID:       id,
+			UserName: userName,
+			Name:     name,
+			Email:    email,
+			// User.ID is always null by contract -- see WatchListUser.User's
+			// own doc comment ("its id is always null: a watch-list entry is
+			// not guaranteed to point at a user record"). Pass "" rather
+			// than id so NewUserReference omits it, even though this
+			// particular row is known to resolve to a real user.
+			User: domain.NewUserReference("", email, name),
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate case watch list: %w", err)
+	}
+	return watchers, nil
+}
+
+// SetCaseWatchList implements CaseRepository.
+func (r *caseRepo) SetCaseWatchList(ctx context.Context, caseID string, userIDs []string, callerEmail string) ([]domain.WatchListUser, time.Time, error) {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return nil, time.Time{}, fmt.Errorf("set case watch list: begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	var updatedOn time.Time
+	err = tx.QueryRow(ctx, `UPDATE work_item SET updated_on = NOW(), updated_by = $2 WHERE id = $1 RETURNING updated_on`, caseID, callerEmail).Scan(&updatedOn)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, time.Time{}, &apierror.NotFoundError{Msg: "case not found"}
+	}
+	if err != nil {
+		return nil, time.Time{}, fmt.Errorf("touch work_item for watch list update: %w", err)
+	}
+
+	if _, err := tx.Exec(ctx, `DELETE FROM work_item_watcher WHERE work_item_id = $1`, caseID); err != nil {
+		return nil, time.Time{}, fmt.Errorf("clear case watch list: %w", err)
+	}
+
+	for _, userID := range userIDs {
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO work_item_watcher (id, work_item_id, user_id) VALUES (gen_random_uuid(), $1, $2)`,
+			caseID, userID,
+		); err != nil {
+			if pgErr := (*pgconn.PgError)(nil); errors.As(err, &pgErr) && pgErr.Code == "23503" {
+				return nil, time.Time{}, &apierror.ValidationError{Msg: "one or more watch list user IDs do not exist: " + pgErr.Detail}
+			}
+			return nil, time.Time{}, fmt.Errorf("insert case watcher: %w", err)
+		}
+	}
+
+	watchers, err := fetchCaseWatchers(ctx, tx, caseID)
+	if err != nil {
+		return nil, time.Time{}, err
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, time.Time{}, fmt.Errorf("set case watch list: commit tx: %w", err)
+	}
+
+	return watchers, updatedOn, nil
+}
+
+// scanTag scans a single (id, name) row into a domain.Tag. tag has no
+// "color" column (migration 000021), unlike ServiceNow's label table, so
+// Color is always nil for a Postgres-sourced tag.
+func scanTag(row interface{ Scan(...any) error }) (domain.Tag, error) {
+	var t domain.Tag
+	err := row.Scan(&t.ID, &t.Label)
+	return t, err
+}
+
+// AddCaseTag implements CaseRepository.
+func (r *caseRepo) AddCaseTag(ctx context.Context, caseID, label, callerEmail string) (domain.Tag, error) {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return domain.Tag{}, fmt.Errorf("add case tag: begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	// Find or create the tag by name, case-insensitively. tag.name has no
+	// UNIQUE constraint (migration 000021), so this can race with a
+	// concurrent AddCaseTag for the same never-before-seen label and
+	// produce two rows with the same name -- a cosmetic duplicate (each
+	// still links correctly via its own id), not a correctness bug, and not
+	// fixable here without a schema change (out of scope).
+	tag, err := scanTag(tx.QueryRow(ctx, `SELECT id, name FROM tag WHERE LOWER(name) = LOWER($1) LIMIT 1`, label))
+	if errors.Is(err, pgx.ErrNoRows) {
+		tag, err = scanTag(tx.QueryRow(ctx,
+			`INSERT INTO tag (id, created_on, updated_on, created_by, updated_by, name)
+			 VALUES (gen_random_uuid(), NOW(), NOW(), $1, $1, $2)
+			 RETURNING id, name`, callerEmail, label))
+	}
+	if err != nil {
+		return domain.Tag{}, fmt.Errorf("find or create tag: %w", err)
+	}
+
+	// Idempotent attach: a second AddCaseTag for a label already on this
+	// case returns the existing tag rather than erroring or duplicating the
+	// work_item_tag row. work_item_tag has no UNIQUE constraint on
+	// (work_item_id, tag_id) (migration 000021), so this is guarded with
+	// "AND NOT EXISTS" rather than "ON CONFLICT DO NOTHING", which would
+	// need one to match against.
+	_, err = tx.Exec(ctx, `
+		INSERT INTO work_item_tag (id, created_on, updated_on, created_by, updated_by, work_item_id, tag_id)
+		SELECT gen_random_uuid(), NOW(), NOW(), $1, $1, wi.id, $3
+		FROM work_item wi
+		WHERE wi.id = $2
+		  AND NOT EXISTS (SELECT 1 FROM work_item_tag wit WHERE wit.work_item_id = $2 AND wit.tag_id = $3)`,
+		callerEmail, caseID, tag.ID)
+	if err != nil {
+		if pgErr := (*pgconn.PgError)(nil); errors.As(err, &pgErr) && pgErr.Code == "23503" {
+			return domain.Tag{}, &apierror.ValidationError{Msg: "case not found: " + pgErr.Detail}
+		}
+		return domain.Tag{}, fmt.Errorf("attach tag to case: %w", err)
+	}
+
+	// The INSERT ... SELECT above silently inserts zero rows (rather than
+	// erroring) when caseID doesn't reference an existing work_item, since
+	// the FROM work_item WHERE wi.id = $2 clause just matches nothing. Check
+	// caseID separately so that case is reported as a ValidationError
+	// instead of a misleadingly successful response.
+	var exists bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM work_item WHERE id = $1)`, caseID).Scan(&exists); err != nil {
+		return domain.Tag{}, fmt.Errorf("verify case exists: %w", err)
+	}
+	if !exists {
+		return domain.Tag{}, &apierror.ValidationError{Msg: "case not found: " + caseID}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return domain.Tag{}, fmt.Errorf("add case tag: commit tx: %w", err)
+	}
+
+	return tag, nil
+}
+
+// RemoveCaseTag implements CaseRepository.
+func (r *caseRepo) RemoveCaseTag(ctx context.Context, caseID, tagID, _ string) error {
+	tag, err := r.db.Exec(ctx, `DELETE FROM work_item_tag WHERE work_item_id = $1 AND tag_id = $2`, caseID, tagID)
+	if err != nil {
+		return fmt.Errorf("remove case tag: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return &apierror.NotFoundError{Msg: "tag not found on this case"}
+	}
+	return nil
+}
+
+// SearchTags implements CaseRepository.
+func (r *caseRepo) SearchTags(ctx context.Context, searchQuery, _ string, limit int) ([]domain.Tag, error) {
+	where := "WHERE 1=1"
+	args := []any{}
+	if searchQuery != "" {
+		escaped := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(searchQuery)
+		args = append(args, "%"+escaped+"%")
+		where += " AND name ILIKE $1 ESCAPE '\\'"
+	}
+	args = append(args, limit)
+
+	query := fmt.Sprintf(`SELECT id, name FROM tag %s ORDER BY created_on DESC, id LIMIT $%d`, where, len(args))
+
+	rows, err := r.db.Query(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("search tags: %w", err)
+	}
+	defer rows.Close()
+
+	tags := make([]domain.Tag, 0, limit)
+	for rows.Next() {
+		t, err := scanTag(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan tag: %w", err)
+		}
+		tags = append(tags, t)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate tags: %w", err)
+	}
+	return tags, nil
 }

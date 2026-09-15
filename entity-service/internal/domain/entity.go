@@ -466,6 +466,11 @@ type ProjectDetailsView struct {
 	// this project is eligible to raise service requests.
 	HasSr bool `json:"hasSr"`
 	ProjectClosureFields
+	// OnboardingOwner is the person assigned to run this project's
+	// onboarding. Nil when no owner is assigned — most projects, since only
+	// onboarding-enabled projects have one. Currently populated only from
+	// the ServiceNow data source.
+	OnboardingOwner *PersonRef `json:"onboardingOwner,omitempty"`
 }
 
 // ProjectUpdateRequest is the input for PATCH /projects/{id} (ServiceNow data
@@ -1467,7 +1472,8 @@ type CaseView struct {
 	ResolutionCode  *CaseResolutionCode `json:"resolutionCode"`
 	Cause           *CaseCause          `json:"cause"`
 	ResolutionNotes *string             `json:"resolutionNotes"`
-	// WatchList is the set of users watching the case (ServiceNow data source only).
+	// WatchList is the set of users watching the case. For the Postgres data
+	// source this is backed by work_item_watcher (migration 000040).
 	WatchList []WatchListUser `json:"watchList,omitempty"`
 	// AutoclosureStep indicates where the case sits in ServiceNow's staged auto-closure
 	// sequence: DEFAULT -> FIRST_COMMENT -> ON_HOLD -> SECOND_COMMENT. Read-only —
@@ -1847,6 +1853,9 @@ type SearchCaseView struct {
 	// only; null otherwise. CSM-engineer-facing only, never shared with the
 	// customer.
 	WorstCaseFixEta *string `json:"worstCaseFixEta"`
+	// EscalationLevel is the case's current escalation level -- see
+	// CaseView.EscalationLevel's doc comment.
+	EscalationLevel *string `json:"escalationLevel"`
 }
 
 // SearchCasesResponse is the paginated result of a case search. When the
@@ -2910,8 +2919,8 @@ type SearchContactsFilters struct {
 	SearchQuery string `json:"searchQuery"`
 }
 
-// ProjectContact is a contact associated with a project. Supported by the
-// ServiceNow data source only; there is no Postgres equivalent.
+// ProjectContact is a contact associated with a project. For the Postgres
+// data source, backed by the project_contact table (migration 000022).
 type ProjectContact struct {
 	// ID is the contact's user id, for linking a row to that user's profile. Nil when
 	// the row has no contact record linked, or when the backing instance predates the
@@ -2959,8 +2968,8 @@ type SearchProjectContactsResponse struct {
 	Offset   int              `json:"offset"`
 }
 
-// AccountContact is a contact associated with an account. Supported by the
-// ServiceNow data source only; there is no Postgres equivalent.
+// AccountContact is a contact associated with an account. For the Postgres
+// data source, backed by the account_contact table (migration 000020).
 type AccountContact struct {
 	Name      string `json:"name"`
 	Email     string `json:"email"`
@@ -5082,6 +5091,22 @@ type SearchEscalationsResponse struct {
 	Limit       int          `json:"limit"`
 }
 
+// CaseEscalationHistory is the response for GET /cases/{id}/escalations: a
+// single case's full escalation history (newest first), plus who is
+// authorized to de-escalate its current level.
+type CaseEscalationHistory struct {
+	Escalations []Escalation `json:"escalations"`
+	Total       int          `json:"total"`
+	// CurrentNotifiedUsers is the NotifiedUsers list of the most recent
+	// record in Escalations (i.e. who was notified about the case's current
+	// escalation level). Always present (an empty array, never omitted/null)
+	// when the case has never been escalated. Only someone on this list is
+	// authorized to de-escalate the case's current level -- surfaced as its
+	// own field so callers don't each re-derive "the first record's notified
+	// list" independently.
+	CurrentNotifiedUsers []EscalationNotifiedUser `json:"currentNotifiedUsers"`
+}
+
 // --- case-grouped time cards (ServiceNow data source only) ---
 
 // CaseTimeCardBillingInfo is a billable/non-billable time breakdown.
@@ -5612,4 +5637,61 @@ type ListScheduledTaskRunsResponse struct {
 // DELETE /scheduled-task-runs?resolvedBefore=<RFC3339 timestamp>.
 type DeleteScheduledTaskRunsResponse struct {
 	DeletedCount int `json:"deletedCount"`
+}
+
+// AlertIncidentMappingView is the durable record of one monitoring alert
+// that was grouped onto a CSM incident — e.g. a firing event and a later
+// resolved event for the same underlying condition both map onto the same
+// incident rather than each creating its own. Like SLAClock and
+// ScheduledTaskRun, this is CSM-native data with no ServiceNow equivalent
+// and is always backed by Postgres regardless of DATA_SOURCE.
+//
+// Source/UniqueIdentifier together identify the correlation key a caller
+// uses to find prior alerts for the same underlying condition (see
+// LookupAlertIncidentMappingsRequest); which sources exist and how they
+// derive UniqueIdentifier is a policy decision made entirely by whatever
+// ingests the alert, not something this service tracks.
+type AlertIncidentMappingView struct {
+	ID          string `json:"id"`
+	AlertNumber string `json:"alertNumber"`
+	Source      string `json:"source"`
+	// UniqueIdentifier is the correlation key within Source used to group
+	// related alerts (e.g. the monitoring system's own alert group/fingerprint
+	// id) — optional, since not every source can supply one.
+	UniqueIdentifier *string `json:"uniqueIdentifier,omitempty"`
+	Service          *string `json:"service,omitempty"`
+	MetricName       *string `json:"metricName,omitempty"`
+	AlertStatus      string  `json:"alertStatus"`
+	IncidentID       string  `json:"incidentId"`
+	IncidentNumber   *string `json:"incidentNumber,omitempty"`
+	CreatedOn        string  `json:"createdOn"`
+}
+
+// CreateAlertIncidentMappingRequest is the request body for
+// POST /alert-incident-mappings.
+type CreateAlertIncidentMappingRequest struct {
+	AlertNumber      string  `json:"alertNumber"`
+	Source           string  `json:"source"`
+	UniqueIdentifier *string `json:"uniqueIdentifier,omitempty"`
+	Service          *string `json:"service,omitempty"`
+	MetricName       *string `json:"metricName,omitempty"`
+	AlertStatus      string  `json:"alertStatus"`
+	IncidentID       string  `json:"incidentId"`
+	IncidentNumber   *string `json:"incidentNumber,omitempty"`
+}
+
+// LookupAlertIncidentMappingsRequest is the request body for
+// POST /alert-incident-mappings/lookup — finds every alert already grouped
+// onto an incident for the same (Source, UniqueIdentifier) correlation key.
+type LookupAlertIncidentMappingsRequest struct {
+	Source           string `json:"source"`
+	UniqueIdentifier string `json:"uniqueIdentifier"`
+}
+
+// LookupAlertIncidentMappingsResponse is the response body for
+// POST /alert-incident-mappings/lookup. Mappings is most-recent-first
+// (ORDER BY created_at DESC) and empty (never null) when nothing matches —
+// absence is a valid result for a lookup, not a 404.
+type LookupAlertIncidentMappingsResponse struct {
+	Mappings []AlertIncidentMappingView `json:"mappings"`
 }

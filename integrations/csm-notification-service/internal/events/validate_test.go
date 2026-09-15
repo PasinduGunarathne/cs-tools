@@ -32,7 +32,8 @@ func TestValidate_Valid(t *testing.T) {
 		typ      Type
 		payload  string
 	}{
-		"case.created":                          {"CASE-1", TypeCaseCreated, `{"reporterName":"n","projectName":"p","projectId":"PROJ-1","caseId":"CASE-1","caseTitle":"t","caseType":"Incident","priority":"P3","createdAt":"2026-01-01","description":"d","recipients":["r@x.com"]}`},
+		"case.created": {"CASE-1", TypeCaseCreated, `{"reporterName":"n","projectName":"p","projectId":"PROJ-1","caseId":"CASE-1","caseTitle":"t","caseType":"Incident","priority":"P3","createdAt":"2026-01-01","description":"d","recipients":["r@x.com"]}`},
+		"case.created omits priority (e.g. security_report_analysis, which has no severity)": {"CASE-1", TypeCaseCreated, `{"reporterName":"n","projectName":"p","projectId":"PROJ-1","caseId":"CASE-1","caseTitle":"t","caseType":"SECURITY_REPORT_ANALYSIS","createdAt":"2026-01-01","description":"d","recipients":["r@x.com"]}`},
 		"case.comment_added":                    {"CASE-1", TypeCommentAdded, `{"name":"n","projectId":"PROJ-1","caseId":"CASE-1","caseTitle":"t","caseComment":"c","commentId":"C-1","recipients":["r@x.com"]}`},
 		"case.status_changed":                   {"CASE-1", TypeStatusChanged, `{"projectId":"PROJ-1","caseId":"CASE-1","newStatus":"Open","recipients":["r@x.com"]}`},
 		"case.assigned":                         {"CASE-1", TypeCaseAssigned, `{"assigneeName":"n","assigneeEmail":"e@x.com","projectId":"PROJ-1","caseId":"CASE-1","recipients":["r@x.com"]}`},
@@ -48,7 +49,7 @@ func TestValidate_Valid(t *testing.T) {
 		"incident.priority_elevated without a title": {"INC-1", TypeIncidentPriorityElevated, `{"oldPriority":"MODERATE","newPriority":"HIGH"}`},
 		"incident.comment_added (public)":            {"INC-1", TypeIncidentCommentAdded, `{"commentId":"c-1","isPublic":true}`},
 		"incident.comment_added (work note)":         {"INC-1", TypeIncidentCommentAdded, `{"commentId":"c-1","isPublic":false}`},
-		"sla.clock.register":                         {"CASE-1", TypeSLAClockRegister, `{"caseTitle":"Gateway returning 500s","caseId":"CASE-1","durations":{"response":"2h"}}`},
+		"sla.clock.register":                         {"CASE-1", TypeSLAClockRegister, `{"caseId":"CASE-1","caseTitle":"Something broke","durations":{"response":"2h"}}`},
 		"sla.tier_reached":                           {"CASE-1", TypeSLATierReached, `{"caseId":"CASE-1","clockType":"response","tier":"50"}`},
 	}
 	for name, c := range cases {
