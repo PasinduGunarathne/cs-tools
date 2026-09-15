@@ -140,13 +140,16 @@ func run() error {
 	// Silence it and fail fast instead of retrying a connection that is not
 	// going to appear.
 	redis.SetLogger(quietLogger{})
-	rdb := redis.NewClient(&redis.Options{Addr: cfg.redisAddr, MaxRetries: -1})
+	rdb, redisWhere, err := openRedis(cfg)
+	if err != nil {
+		return err
+	}
 	defer func() { _ = rdb.Close() }()
 	if err := rdb.Ping(ctx).Err(); err != nil {
 		return fmt.Errorf("cannot reach Redis at %s.\n"+
 			"       The ladder keeps its state there, so this tool needs one running:\n"+
 			"           docker run --rm -p 6379:6379 redis\n"+
-			"       underlying error: %w", cfg.redisAddr, err)
+			"       underlying error: %w", redisWhere, err)
 	}
 
 	if cfg.cleanup {
@@ -428,13 +431,14 @@ func runTicks(ctx context.Context, cfg config, engine *escalation.Engine, rdb *r
 	// cancellation", which over-reports exactly the calls the cancellation
 	// retired.
 	var lastPlaced []bool
+	var lastFailed []string
 	seen := 0
 
 	for {
 		select {
 		case <-ctx.Done():
 			fmt.Printf("\n  interrupted\n")
-			return summarise(context.Background(), cfg, store, rec, plan, cancelledAtLadderTime, lastPlaced)
+			return summarise(context.Background(), cfg, store, rec, plan, cancelledAtLadderTime, lastPlaced, lastFailed)
 		case <-ticker.C:
 			elapsed := time.Since(realStart)
 
@@ -468,9 +472,10 @@ func runTicks(ctx context.Context, cfg config, engine *escalation.Engine, rdb *r
 			}
 			if !found {
 				fmt.Printf("\n  the engine has finished with this incident and cleared its state\n")
-				return summarise(ctx, cfg, store, rec, plan, cancelledAtLadderTime, lastPlaced)
+				return summarise(ctx, cfg, store, rec, plan, cancelledAtLadderTime, lastPlaced, lastFailed)
 			}
 			lastPlaced = append(lastPlaced[:0], st.Placed...)
+			lastFailed = append(lastFailed[:0], st.Failed...)
 			for i, done := range st.Placed {
 				if done && i >= seen {
 					c := st.Plan.Calls[i]
@@ -486,7 +491,7 @@ func runTicks(ctx context.Context, cfg config, engine *escalation.Engine, rdb *r
 
 // summarise prints what the engine would have written back to the incident as
 // a work note, plus what the Twilio client actually sent.
-func summarise(ctx context.Context, cfg config, store *escalation.Store, rec *callRecorder, plan escalation.Plan, localCancelledAt *time.Time, observedPlaced []bool) error {
+func summarise(ctx context.Context, cfg config, store *escalation.Store, rec *callRecorder, plan escalation.Plan, localCancelledAt *time.Time, observedPlaced []bool, observedFailed []string) error {
 	count, twiml := rec.snapshot()
 
 	fmt.Printf("\n%s\n", strings.Repeat("-", 78))
@@ -502,7 +507,7 @@ func summarise(ctx context.Context, cfg config, store *escalation.Store, rec *ca
 	// this runs, taking the cancellation with it — which is exactly the run
 	// whose summary matters most. Fall back to what this tool itself knows:
 	// when it sent the acknowledgement, and which gesture it used.
-	placed := observedPlaced
+	placed, failed := observedPlaced, observedFailed
 	cancelledAt, reason := localCancelledAt, ""
 	if cancelledAt != nil {
 		reason = "Public comment added"
@@ -511,12 +516,12 @@ func summarise(ctx context.Context, cfg config, store *escalation.Store, rec *ca
 		}
 	}
 	if st, found, err := store.Get(ctx, cfg.incidentID); err == nil && found {
-		plan, placed = st.Plan, st.Placed
+		plan, placed, failed = st.Plan, st.Placed, st.Failed
 		if st.Cancelled != nil {
 			cancelledAt, reason = st.Cancelled, st.CancelReason
 		}
 	}
-	for _, line := range plan.ExecutionSummary(placed, cancelledAt, reason) {
+	for _, line := range plan.ExecutionSummary(placed, failed, cancelledAt, reason) {
 		fmt.Println(line)
 	}
 
@@ -554,6 +559,26 @@ func printHeader(cfg config, plan escalation.Plan, trigger time.Time, to string)
 	for _, is := range plan.Issues {
 		fmt.Printf("    %-9s %-8s %s %s\n", "", is.Level, is.Reason, is.Detail)
 	}
+}
+
+// openRedis follows the service's own precedence: REDIS_URL (a rediss://
+// connection string — the managed, TLS instance a deployment uses) ahead of
+// the plain --redis / REDIS_ADDR address. Running against the managed
+// instance is legitimate here: the engine's keys are its own namespace, this
+// tool's incident ids are prefixed "local-", and it retires its ladder on the
+// way out — but it does share that Redis with whatever else uses it, so
+// --cleanup exists for the run that was interrupted before it could.
+func openRedis(cfg config) (*redis.Client, string, error) {
+	if url := os.Getenv("REDIS_URL"); url != "" {
+		opts, err := redis.ParseURL(url)
+		if err != nil {
+			// Not echoing the URL: it carries the password.
+			return nil, "", errors.New("REDIS_URL is set but does not parse as a redis:// or rediss:// URL")
+		}
+		opts.MaxRetries = -1
+		return redis.NewClient(opts), opts.Addr + " (from REDIS_URL)", nil
+	}
+	return redis.NewClient(&redis.Options{Addr: cfg.redisAddr, MaxRetries: -1}), cfg.redisAddr, nil
 }
 
 // retireLadder drops a ladder's outstanding calls and its state, so nothing

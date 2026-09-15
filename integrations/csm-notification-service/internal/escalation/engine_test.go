@@ -26,6 +26,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wso2-open-operations/cs-tools/integrations/csm-notification-service/internal/apierror"
 	"github.com/wso2-open-operations/cs-tools/integrations/csm-notification-service/internal/eventbus"
 	"github.com/wso2-open-operations/cs-tools/integrations/csm-notification-service/internal/events"
 	"github.com/wso2-open-operations/cs-tools/integrations/csm-notification-service/internal/notifications"
@@ -701,7 +702,7 @@ func TestNewEngine_NilNotesClientDoesNotPanic(t *testing.T) {
 		t.Fatal("a nil *EntityClient must leave the interface field nil, not hold a nil pointer")
 	}
 	// writeNote is the path that would panic; it must log and return instead.
-	if err := e.writeNote(context.Background(), Plan{}, nil, nil, ""); err != nil {
+	if err := e.writeNote(context.Background(), Plan{}, nil, nil, nil, ""); err != nil {
 		t.Errorf("writeNote with no client should be a no-op, got %v", err)
 	}
 }
@@ -738,7 +739,7 @@ func TestEngine_SummaryReportsOnlyCallsActuallyPlaced(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	lines := st.Plan.ExecutionSummary(st.Placed, st.Cancelled, st.CancelReason)
+	lines := st.Plan.ExecutionSummary(st.Placed, st.Failed, st.Cancelled, st.CancelReason)
 	calls := 0
 	for _, l := range lines {
 		if strings.Contains(l, "[OK][Call]") {
@@ -771,7 +772,7 @@ func TestEngine_SummaryReportsOnlyCallsActuallyPlaced(t *testing.T) {
 
 	// Without the flags the old approximation still applies, for a caller
 	// that genuinely has no engine (cmd/ladder-harness).
-	approx := st.Plan.ExecutionSummary(nil, st.Cancelled, st.CancelReason)
+	approx := st.Plan.ExecutionSummary(nil, nil, st.Cancelled, st.CancelReason)
 	approxCalls := 0
 	for _, l := range approx {
 		if strings.Contains(l, "[OK][Call]") {
@@ -836,5 +837,77 @@ func TestEngine_ShortBacklogStillSchedulesTheRemainder(t *testing.T) {
 	}
 	if len(caller.placed) != 3 {
 		t.Errorf("placed %d calls on catch-up, want 3 (LEVEL_1's attempts at +6, +8, +10)", len(caller.placed))
+	}
+}
+
+// Found by a live run: Twilio rejected a call outright (a 4xx — an unverified
+// number on a trial account), and the engine retried it every tick for the
+// rest of the ladder's life. Since the call was never "placed", the ladder
+// could never complete either. A rejection the provider will repeat for the
+// same request is a permanent failure: record it, list it in the work note
+// the way section 11.0 lists a missing number, and let the ladder move on.
+func TestEngine_ProviderRejectionIsRecordedNotRetried(t *testing.T) {
+	store, notes := newMemStore(), &fakeNotes{}
+	caller := &fakeCaller{err: &apierror.Error{StatusCode: 400,
+		Body: `{"code":21219,"message":"The number is unverified.","status":400}`}}
+	e := testEngine(store, caller, notes, enabled())
+	at := ist(2026, 9, 9, 10, 0)
+	if err := e.Handle(context.Background(), createdEvent(t, "CRITICAL", at)); err != nil {
+		t.Fatal(err)
+	}
+
+	// The first LEVEL_1 attempt comes due and is rejected.
+	if err := e.Tick(context.Background(), at.Add(7*time.Minute)); err != nil {
+		t.Fatalf("a permanent rejection must not surface as a tick error (it would retry): %v", err)
+	}
+	st, _, _ := store.Get(context.Background(), testIncidentID)
+	if st.Placed[0] {
+		t.Error("a rejected call must not be recorded as placed")
+	}
+	if got := st.failure(0); got != "REJECTED_400_21219" {
+		t.Errorf("failure reason = %q, want REJECTED_400_21219", got)
+	}
+	if _, still := store.wakes[wakeMember(testIncidentID, 0)]; still {
+		t.Error("a rejected call must be retired from the wake index, not retried")
+	}
+
+	// Every later call is rejected the same way; the ladder must still run
+	// its course and write its summary rather than sit in Redis forever.
+	if err := e.Tick(context.Background(), at.Add(2*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if _, found, _ := store.Get(context.Background(), testIncidentID); found {
+		t.Error("a ladder whose every call was rejected must still complete")
+	}
+	if len(notes.notes) != 1 {
+		t.Fatalf("wrote %d work notes, want 1", len(notes.notes))
+	}
+	if !strings.Contains(notes.notes[0], "[LEVEL_1][ERROR][CALL_FAILED][sub.lead@wso2.com][REJECTED_400_21219]") {
+		t.Errorf("the work note does not report the rejection:\n%s", notes.notes[0])
+	}
+	if strings.Contains(notes.notes[0], "[OK][Call]") {
+		t.Error("the work note claims a call was placed; none were")
+	}
+}
+
+// A transient failure is the other case and must keep the old behaviour: the
+// call stays scheduled and the next tick retries it.
+func TestEngine_TransientFailureIsStillRetried(t *testing.T) {
+	store := newMemStore()
+	caller := &fakeCaller{err: &apierror.Error{StatusCode: 503, Body: "service unavailable"}}
+	e := testEngine(store, caller, &fakeNotes{}, enabled())
+	at := ist(2026, 9, 9, 10, 0)
+	if err := e.Handle(context.Background(), createdEvent(t, "CRITICAL", at)); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.Tick(context.Background(), at.Add(7*time.Minute)); err == nil {
+		t.Fatal("a transient failure must surface so the tick is retried")
+	}
+	st, _, _ := store.Get(context.Background(), testIncidentID)
+	if st.failure(0) != "" {
+		t.Error("a 5xx must not be recorded as a permanent failure")
+	}
+	if _, still := store.wakes[wakeMember(testIncidentID, 0)]; !still {
+		t.Error("a transiently failed call must stay scheduled")
 	}
 }

@@ -301,6 +301,13 @@ func (t Trigger) VoiceSpeech() notifications.Speech {
 // documented sample reads, and anyone diffing a real work note against the
 // document will expect it.
 //
+// failed is parallel to Plan.Calls as well: a non-empty entry is the reason a
+// call was rejected by the provider and given up on. It is listed under its
+// attempt as [LEVEL_n][ERROR][CALL_FAILED][email][reason] — the same shape
+// section 11.0 uses for a recipient with no number, because to the person
+// reading the note both mean the same thing: this rung tried and this person
+// was not reached.
+//
 // placed is parallel to Plan.Calls and says which calls were actually dialled.
 // Pass it whenever it is known — the engine always knows — and the summary
 // reports only those. Passing nil falls back to "everything scheduled before
@@ -319,7 +326,7 @@ func (t Trigger) VoiceSpeech() notifications.Speech {
 // gesture that stopped it — which matters because there are two, and which one
 // fired says whether somebody changed the status or left a public comment.
 // Empty defaults to "Acknowledged", the wording the documented sample uses.
-func (p Plan) ExecutionSummary(placed []bool, cancelledAt *time.Time, reason string) []string {
+func (p Plan) ExecutionSummary(placed []bool, failed []string, cancelledAt *time.Time, reason string) []string {
 	const stamp = "2006-01-02 15:04:05"
 	lines := []string{
 		fmt.Sprintf("[%s][OK][Start : Notification Plan - %s][%s/%s]",
@@ -390,25 +397,30 @@ func (p Plan) ExecutionSummary(placed []bool, cancelledAt *time.Time, reason str
 		// the attempt that placed them, not flat under the level.
 		for _, ord := range attemptOrdinals(b.calls) {
 			var due time.Time
-			var dialled []PlannedCall
+			var attempted []PlannedCall
 			for _, c := range b.calls {
 				if c.Ordinal != ord {
 					continue
 				}
-				if !wasPlaced(placed, c, cancelledAt) {
+				if !wasPlaced(placed, c, cancelledAt) && failureOf(failed, c) == "" {
 					continue
 				}
 				if due.IsZero() || c.At.Before(due) {
 					due = c.At
 				}
-				dialled = append(dialled, c)
+				attempted = append(attempted, c)
 			}
-			if len(dialled) == 0 {
+			if len(attempted) == 0 {
 				continue
 			}
 			lines = append(lines, fmt.Sprintf("[%s][OK][%s][Start : Notification Attempt]",
 				due.Format(stamp), b.level))
-			for _, c := range dialled {
+			for _, c := range attempted {
+				if why := failureOf(failed, c); why != "" {
+					lines = append(lines, fmt.Sprintf("[%s][%s][ERROR][CALL_FAILED][%s][%s]",
+						c.At.Format(stamp), c.Level, c.Recipient.Email, why))
+					continue
+				}
 				lines = append(lines, fmt.Sprintf("[%s][%s][OK][Call][%s][%s]",
 					c.At.Format(stamp), c.Level, c.Recipient.Email, c.Recipient.Phone))
 			}
@@ -425,7 +437,8 @@ func (p Plan) ExecutionSummary(placed []bool, cancelledAt *time.Time, reason str
 		// scheduled", and counting by time alone lost it from both totals.
 		dropped := 0
 		for i := range p.Calls {
-			if !wasPlaced(placed, p.Calls[i].withIndex(i), cancelledAt) {
+			c := p.Calls[i].withIndex(i)
+			if !wasPlaced(placed, c, cancelledAt) && failureOf(failed, c) == "" {
 				dropped++
 			}
 		}
@@ -437,7 +450,7 @@ func (p Plan) ExecutionSummary(placed []bool, cancelledAt *time.Time, reason str
 
 // WorkNote renders the execution summary as the work note section 11.0
 // specifies, heading and all, ready to PATCH onto the incident.
-func (p Plan) WorkNote(placed []bool, cancelledAt *time.Time, reason string) string {
+func (p Plan) WorkNote(placed []bool, failed []string, cancelledAt *time.Time, reason string) string {
 	const stamp = "2006-01-02 15:04:05"
 	var b strings.Builder
 	b.WriteString("Execution Summary Of the Escalation Flow\n\n")
@@ -453,7 +466,7 @@ func (p Plan) WorkNote(placed []bool, cancelledAt *time.Time, reason string) str
 		orNone(p.Trigger.Routing.AssignedCRETeam),
 		p.Trigger.Routing.ABTEligible))
 	b.WriteString("Execution Summary:\n\n")
-	b.WriteString(strings.Join(p.ExecutionSummary(placed, cancelledAt, reason), "\n"))
+	b.WriteString(strings.Join(p.ExecutionSummary(placed, failed, cancelledAt, reason), "\n"))
 	return b.String()
 }
 
@@ -462,6 +475,14 @@ func (p Plan) WorkNote(placed []bool, cancelledAt *time.Time, reason string) str
 func (c PlannedCall) withIndex(i int) PlannedCall {
 	c.index = i
 	return c
+}
+
+// failureOf is the recorded rejection reason for a call, or "".
+func failureOf(failed []string, c PlannedCall) string {
+	if c.index < len(failed) {
+		return failed[c.index]
+	}
+	return ""
 }
 
 // wasPlaced reports whether a call should appear in the summary as dialled.

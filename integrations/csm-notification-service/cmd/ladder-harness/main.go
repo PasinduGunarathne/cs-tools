@@ -212,7 +212,7 @@ func run(cfg config) error {
 	if trigger.Kind == escalation.TriggerPriorityElevated {
 		reason = "Public comment added"
 	}
-	for _, line := range plan.ExecutionSummary(nil, cancelledAt, reason) {
+	for _, line := range plan.ExecutionSummary(nil, nil, cancelledAt, reason) {
 		fmt.Println(line)
 	}
 	fmt.Printf("\n%d call(s) %s.\n", placed, map[bool]string{true: "placed", false: "simulated"}[cfg.live])

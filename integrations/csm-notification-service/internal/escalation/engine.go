@@ -24,6 +24,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/wso2-open-operations/cs-tools/integrations/csm-notification-service/internal/apierror"
 	"github.com/wso2-open-operations/cs-tools/integrations/csm-notification-service/internal/eventbus"
 	"github.com/wso2-open-operations/cs-tools/integrations/csm-notification-service/internal/events"
 	"github.com/wso2-open-operations/cs-tools/integrations/csm-notification-service/internal/notifications"
@@ -224,7 +225,7 @@ func (e *Engine) start(ctx context.Context, t Trigger, replace bool) error {
 		slog.WarnContext(ctx, "escalation: plan has no reachable recipients; nothing scheduled",
 			"incidentId", t.IncidentID, "priority", t.Priority, "rule", t.Routing.Rule(),
 			"shift", string(t.Routing.Shift), "product", t.Routing.Product, "team", t.Routing.AssignedCRETeam)
-		return e.writeNote(ctx, plan, nil, nil, "")
+		return e.writeNote(ctx, plan, nil, nil, nil, "")
 	}
 
 	// A ladder whose every call is already in the past has nothing left to
@@ -353,7 +354,7 @@ func (e *Engine) cancelBy(ctx context.Context, incidentID string, reason cancelR
 			"cancelledCalls", len(pending))
 	}
 
-	if err := e.writeNote(ctx, st.Plan, st.Placed, st.Cancelled, st.CancelReason); err != nil {
+	if err := e.writeNote(ctx, st.Plan, st.Placed, st.Failed, st.Cancelled, st.CancelReason); err != nil {
 		return err
 	}
 	return e.store.Delete(ctx, incidentID)
@@ -400,16 +401,29 @@ func (e *Engine) processDue(ctx context.Context, member string) error {
 		// leftover. Dropping it is the correct outcome.
 		return e.store.RemoveWakes(ctx, member)
 	}
-	if st.Cancelled != nil || st.Placed[index] {
+	if st.Cancelled != nil || st.Placed[index] || st.failure(index) != "" {
 		return e.store.RemoveWakes(ctx, member)
 	}
 
 	call := st.Plan.Calls[index]
 	if err := e.place(ctx, st.Plan.Trigger, call); err != nil {
-		return fmt.Errorf("escalation: place %s call for %s: %w", call.Level, incidentID, err)
+		if !isPermanent(err) {
+			// Transient — leave the wake entry, the next tick retries.
+			return fmt.Errorf("escalation: place %s call for %s: %w", call.Level, incidentID, err)
+		}
+		// The provider rejected the request itself; trying again with the
+		// same number and the same document cannot succeed. Record why, so
+		// the work note says this person was not reached and the ladder can
+		// still complete, then treat it like a placed call for scheduling.
+		slog.ErrorContext(ctx, "escalation: call rejected by the provider; not retrying",
+			"incidentId", incidentID, "rule", st.Plan.Trigger.Routing.Rule(),
+			"level", call.Level.String(), "attempt", call.Ordinal,
+			"to", maskPhone(call.Recipient.Phone), "reason", permanentReason(err))
+		st.setFailure(index, permanentReason(err))
+	} else {
+		st.Placed[index] = true
 	}
 
-	st.Placed[index] = true
 	if err := e.store.Save(ctx, incidentID, st); err != nil {
 		return fmt.Errorf("escalation: record placed call for %s: %w", incidentID, err)
 	}
@@ -417,10 +431,10 @@ func (e *Engine) processDue(ctx context.Context, member string) error {
 		return fmt.Errorf("escalation: clear placed call for %s: %w", incidentID, err)
 	}
 
-	if st.AllPlaced() {
+	if st.AllSettled() {
 		// The ladder ran to its end without anyone acknowledging. Record what
 		// happened and stop tracking it.
-		if err := e.writeNote(ctx, st.Plan, st.Placed, nil, ""); err != nil {
+		if err := e.writeNote(ctx, st.Plan, st.Placed, st.Failed, nil, ""); err != nil {
 			return err
 		}
 		slog.WarnContext(ctx, "escalation: ladder exhausted without acknowledgement",
@@ -455,8 +469,8 @@ func (e *Engine) place(ctx context.Context, t Trigger, call PlannedCall) error {
 // With no entity-service client configured the summary is logged instead, so a
 // deployment without one still runs the ladder rather than failing every
 // record.
-func (e *Engine) writeNote(ctx context.Context, plan Plan, placed []bool, cancelledAt *time.Time, reason string) error {
-	note := plan.WorkNote(placed, cancelledAt, reason)
+func (e *Engine) writeNote(ctx context.Context, plan Plan, placed []bool, failed []string, cancelledAt *time.Time, reason string) error {
+	note := plan.WorkNote(placed, failed, cancelledAt, reason)
 	if e.notes == nil {
 		slog.InfoContext(ctx, "escalation: no incident-notes client configured; execution summary not written back",
 			"incidentId", plan.Trigger.IncidentID)
@@ -490,11 +504,40 @@ func (e *Engine) RunTicker(ctx context.Context, interval time.Duration) {
 func pendingMembers(incidentID string, st LadderState) []string {
 	var out []string
 	for i, done := range st.Placed {
-		if !done {
+		if !done && st.failure(i) == "" {
 			out = append(out, wakeMember(incidentID, i))
 		}
 	}
 	return out
+}
+
+// isPermanent reports whether a call error is one that retrying cannot fix:
+// the provider accepted the request and rejected its content. Anything else —
+// a network failure, a 5xx, a timeout — is transient and stays scheduled.
+func isPermanent(err error) bool {
+	var upstream *apierror.Error
+	if errors.As(err, &upstream) {
+		return upstream.StatusCode >= 400 && upstream.StatusCode < 500
+	}
+	return false
+}
+
+// permanentReason renders a rejection for the log line and the work note:
+// the provider's own status and, where it gives one, its error code — without
+// the body, which can echo the number back.
+func permanentReason(err error) string {
+	var upstream *apierror.Error
+	if !errors.As(err, &upstream) {
+		return "REJECTED"
+	}
+	var payload struct {
+		Code    int    `json:"code"`
+		Message string `json:"message"`
+	}
+	if json.Unmarshal([]byte(upstream.Body), &payload) == nil && payload.Code != 0 {
+		return fmt.Sprintf("REJECTED_%d_%d", upstream.StatusCode, payload.Code)
+	}
+	return fmt.Sprintf("REJECTED_%d", upstream.StatusCode)
 }
 
 // maskPhone keeps only the last four digits, matching dispatch.maskPhone's own

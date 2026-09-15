@@ -54,6 +54,15 @@ type LadderState struct {
 	// actually been dialled, so a redelivered wake entry cannot call the same
 	// person twice for the same attempt.
 	Placed []bool `json:"placed"`
+	// Failed is parallel to Plan.Calls too: a non-empty Failed[i] is the
+	// reason call i was given up on rather than retried. Only a PERMANENT
+	// failure lands here — the call provider rejecting the request itself
+	// (a 4xx: an invalid or unverified number, a malformed document). A
+	// transient failure (network, 5xx) is not recorded at all; its wake entry
+	// stays and the next tick retries it. Without this a single bad number on
+	// a roster was retried every tick for the ladder's whole life, and since
+	// that call was never "placed", the ladder could never complete.
+	Failed []string `json:"failed,omitempty"`
 	// Cancelled is set when an acknowledgement arrived, before the remaining
 	// wake entries are dropped, so a retry of the cancellation knows the
 	// dropping half already happened.
@@ -64,14 +73,33 @@ type LadderState struct {
 	CancelReason string `json:"cancelReason,omitempty"`
 }
 
-// AllPlaced reports whether every call in the plan has been dialled.
-func (s LadderState) AllPlaced() bool {
-	for _, done := range s.Placed {
-		if !done {
+// AllSettled reports whether every call in the plan has reached an outcome —
+// dialled, or given up on. It is what decides the ladder has run its course.
+func (s LadderState) AllSettled() bool {
+	for i, done := range s.Placed {
+		if !done && s.failure(i) == "" {
 			return false
 		}
 	}
 	return true
+}
+
+// failure is the recorded permanent-failure reason for call i, or "".
+func (s LadderState) failure(i int) string {
+	if i < len(s.Failed) {
+		return s.Failed[i]
+	}
+	return ""
+}
+
+// setFailure records a permanent failure for call i.
+func (s *LadderState) setFailure(i int, reason string) {
+	if len(s.Failed) < len(s.Placed) {
+		grown := make([]string, len(s.Placed))
+		copy(grown, s.Failed)
+		s.Failed = grown
+	}
+	s.Failed[i] = reason
 }
 
 // PlacedCount is how many calls have actually been dialled.
