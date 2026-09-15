@@ -305,11 +305,13 @@ func localRoster(to string) escalation.Roster {
 	person := func(role string) escalation.Recipient {
 		return escalation.Recipient{Email: role + "@local.invalid", Name: role, Phone: to}
 	}
+	// Named as section 5.0's rule table names them, so the printed ladder is
+	// recognisable against the specification rather than against this file.
 	return escalation.Roster{Default: escalation.LevelRoster{
 		"LEVEL_0": {person("rotation-lead")},
-		"LEVEL_1": {person("sub-lead")},
-		"LEVEL_2": {person("team-lead")},
-		"LEVEL_3": {person("bu-head")},
+		"LEVEL_1": {person("abt-lead")},
+		"LEVEL_2": {person("abt-team-lead")},
+		"LEVEL_3": {person("head-of-bu")},
 		"LEVEL_4": {person("head-of-cre")},
 	}}
 }

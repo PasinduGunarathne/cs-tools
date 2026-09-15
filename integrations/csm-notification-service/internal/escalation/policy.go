@@ -42,12 +42,27 @@ import (
 // Integration, the rotation members for IAM.
 type Level int
 
+// The specification names these rungs twice, in two vocabularies, and they are
+// the same five rungs either way — section 3.0 and the section 5.0 rule table
+// name them by role, section 7.0's timing table by position:
+//
+//	LEVEL_0  Rotation Lead / Rotation Members     (§7.0: "Rotation Lead/Member")
+//	LEVEL_1  ABT Leads / Sub Leads                (§7.0: "Sub Team Lead")
+//	LEVEL_2  ABT Team Leads / Sub Team Leads      (§7.0: "Team Lead")
+//	LEVEL_3  Head of Business Unit                (§7.0: "Head of BU")
+//	LEVEL_4  Head of Customer Success             (§7.0: "Head of CRE")
+//
+// Both names are given below because a reader coming from either half of the
+// document should recognise the rung. The "Common/All ... Pool" variants in
+// rules R3, R4, R7, R8, R13 and R14 are not extra rungs: they are the same
+// LEVEL_1 and LEVEL_2 resolved to a shift-wide pool instead of one team,
+// which is a Resolver concern (see resolver.go), not a change to this ladder.
 const (
-	Level0 Level = iota // rotation lead / members — rotations only
-	Level1              // sub team lead
-	Level2              // team lead
+	Level0 Level = iota // rotation lead / rotation members — rotations only
+	Level1              // ABT leads / sub leads
+	Level2              // ABT team leads / sub team leads
 	Level3              // head of business unit
-	Level4              // head of customer success
+	Level4              // head of customer success (head of CRE)
 )
 
 // String renders the level the way the specification's own execution summary

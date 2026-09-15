@@ -18,6 +18,7 @@ package escalation
 
 import (
 	"context"
+	"strconv"
 	"testing"
 )
 
@@ -180,5 +181,80 @@ func TestParseRoster(t *testing.T) {
 	}
 	if _, err := ParseRoster("{not json"); err == nil {
 		t.Error("expected an error for malformed roster JSON")
+	}
+}
+
+// Every row of section 5.0's table must be reachable and must be the one the
+// document names, because this string is what a log line and the incident's
+// own work note report as the path a call alert took.
+func TestRule_CoversTheWholeTable(t *testing.T) {
+	const (
+		product = "WSO2 API Manager"
+		team    = "Atlas"
+	)
+	tests := []struct {
+		want string
+		rc   RoutingContext
+	}{
+		// Integration / ABT-eligible, a CRE team assigned.
+		{"R1", RoutingContext{Product: product, ABTEligible: true, AssignedCRETeam: team, Shift: ShiftLK}},
+		{"R2", RoutingContext{Product: product, ABTEligible: true, AssignedCRETeam: team, Shift: ShiftLKMorning}},
+		{"R2", RoutingContext{Product: product, ABTEligible: true, AssignedCRETeam: team, Shift: ShiftLKEvening}},
+		{"R2", RoutingContext{Product: product, ABTEligible: true, AssignedCRETeam: team, Shift: ShiftLKWeekend}},
+		// ABT-eligible, no team — the pooled rows.
+		{"R3", RoutingContext{Product: product, ABTEligible: true, Shift: ShiftLK}},
+		{"R4", RoutingContext{Product: product, ABTEligible: true, Shift: ShiftLKEvening}},
+		// Sub-team model: the table stops consulting the team entirely.
+		{"R5", RoutingContext{Product: product, Shift: ShiftLK}},
+		{"R5", RoutingContext{Product: product, AssignedCRETeam: team, Shift: ShiftLK}},
+		{"R6", RoutingContext{Product: product, Shift: ShiftLKMorning}},
+		// No product at all — section 12.0's erroneous scenario.
+		{"R7", RoutingContext{Shift: ShiftLK}},
+		{"R8", RoutingContext{Shift: ShiftLKWeekend}},
+		{"R13", RoutingContext{Shift: ShiftUSA}},
+		{"R14", RoutingContext{Shift: ShiftUSAWeekend}},
+		// Americas.
+		{"R9", RoutingContext{Product: product, ABTEligible: true, Shift: ShiftUSA}},
+		{"R10", RoutingContext{Product: product, ABTEligible: true, Shift: ShiftUSAWeekend}},
+		{"R11", RoutingContext{Product: product, Shift: ShiftUSA}},
+		{"R12", RoutingContext{Product: product, Shift: ShiftUSAWeekend}},
+	}
+	seen := map[string]bool{}
+	for _, tc := range tests {
+		t.Run(tc.want+"/"+string(tc.rc.Shift), func(t *testing.T) {
+			if got := tc.rc.Rule(); got != tc.want {
+				t.Errorf("Rule() = %s, want %s (product=%q abt=%t team=%q shift=%s)",
+					got, tc.want, tc.rc.Product, tc.rc.ABTEligible, tc.rc.AssignedCRETeam, tc.rc.Shift)
+			}
+		})
+		seen[tc.want] = true
+	}
+	for i := 1; i <= 14; i++ {
+		if rule := "R" + strconv.Itoa(i); !seen[rule] {
+			t.Errorf("no case covers %s; the table has 14 rows and all must be reachable", rule)
+		}
+	}
+}
+
+// An unrecognised shift has no row, and reporting the wrong path is worse than
+// admitting there is none.
+func TestRule_UnknownShift(t *testing.T) {
+	rc := RoutingContext{Product: "WSO2 API Manager", ABTEligible: true, Shift: Shift("MARS")}
+	if got := rc.Rule(); got != "UNKNOWN" {
+		t.Errorf("Rule() = %s, want UNKNOWN", got)
+	}
+}
+
+// R10 and R12 differ only by ABT eligibility, and that difference is exactly
+// the LEVEL_0 rule — so the reported path and the scheduled ladder must agree.
+func TestRule_AgreesWithTheLevel0Rule(t *testing.T) {
+	abt := RoutingContext{Product: "WSO2 API Manager", ABTEligible: true, Shift: ShiftUSAWeekend}
+	iam := RoutingContext{Product: "WSO2 Identity Server", Shift: ShiftUSAWeekend}
+
+	if abt.Rule() != "R10" || abt.HasNotificationLevel() {
+		t.Errorf("R10 must have no notification level: rule=%s level0=%t", abt.Rule(), abt.HasNotificationLevel())
+	}
+	if iam.Rule() != "R12" || !iam.HasNotificationLevel() {
+		t.Errorf("R12 must have a notification level: rule=%s level0=%t", iam.Rule(), iam.HasNotificationLevel())
 	}
 }

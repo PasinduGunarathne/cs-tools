@@ -74,6 +74,30 @@ func (s LadderState) AllPlaced() bool {
 	return true
 }
 
+// PlacedCount is how many calls have actually been dialled.
+func (s LadderState) PlacedCount() int {
+	n := 0
+	for _, done := range s.Placed {
+		if done {
+			n++
+		}
+	}
+	return n
+}
+
+// ReachedLevel is the highest rung this ladder actually got to, which is what
+// says how far an incident escalated before somebody picked it up. Returns
+// "NONE" when nothing has been dialled yet.
+func (s LadderState) ReachedLevel() string {
+	reached := "NONE"
+	for i, done := range s.Placed {
+		if done && i < len(s.Plan.Calls) {
+			reached = s.Plan.Calls[i].Level.String()
+		}
+	}
+	return reached
+}
+
 // Store is the Redis-backed ladder store and wake index.
 type Store struct {
 	rdb *redis.Client

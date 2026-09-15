@@ -94,6 +94,85 @@ func (rc RoutingContext) HasNotificationLevel() bool {
 	return true
 }
 
+// Rule identifies which row of section 5.0's rule table (R1–R14) this incident
+// routes by. It is the "path" a call alert took: the table's four inputs —
+// is a WSO2 product present, is the account ABT-eligible, is a CRE team
+// assigned, and the effective shift — select exactly one row, and that row is
+// what decides who each level resolves to.
+//
+// Nothing in the ladder branches on this; the Resolver already applies the same
+// inputs directly. It exists so the decision is *reportable*: an operator
+// asking "why did this page the Americas leads and not ours" gets an answer
+// from one log line and the work note, instead of re-deriving the table by
+// hand from four fields.
+//
+// The rows, as the document orders them:
+//
+//	           product  ABT  team   shift
+//	R1         yes      yes  yes    LK                  R9   yes  yes  n/a  USA
+//	R2         yes      yes  yes    LK rotations        R10  yes  yes  n/a  USA_WEEKEND
+//	R3         yes      yes  no     LK                  R11  yes  no   n/a  USA
+//	R4         yes      yes  no     LK rotations        R12  yes  no   n/a  USA_WEEKEND
+//	R5         yes      no   n/a    LK                  R13  no   n/a  n/a  USA
+//	R6         yes      no   n/a    LK rotations        R14  no   n/a  n/a  USA_WEEKEND
+//	R7         no       n/a  n/a    LK
+//	R8         no       n/a  n/a    LK rotations
+//
+// "LK rotations" is LK_MORNING, LK_EVENING or LK_WEEKEND. An unrecognised
+// shift yields "UNKNOWN" rather than a guess: the table has no row for one,
+// and quietly reporting the wrong path is worse than admitting there is none.
+func (rc RoutingContext) Rule() string {
+	lkRotation := rc.Shift == ShiftLKMorning || rc.Shift == ShiftLKEvening || rc.Shift == ShiftLKWeekend
+
+	// No product at all — section 12.0 treats this as an erroneous scenario
+	// worth emailing about, and the table routes it to a shift-wide pool.
+	if rc.Product == "" {
+		switch {
+		case rc.Shift == ShiftLK:
+			return "R7"
+		case lkRotation:
+			return "R8"
+		case rc.Shift == ShiftUSA:
+			return "R13"
+		case rc.Shift == ShiftUSAWeekend:
+			return "R14"
+		}
+		return "UNKNOWN"
+	}
+
+	if rc.ABTEligible {
+		switch {
+		case rc.Shift == ShiftUSA:
+			return "R9"
+		case rc.Shift == ShiftUSAWeekend:
+			return "R10"
+		case rc.Shift == ShiftLK && rc.AssignedCRETeam != "":
+			return "R1"
+		case rc.Shift == ShiftLK:
+			return "R3"
+		case lkRotation && rc.AssignedCRETeam != "":
+			return "R2"
+		case lkRotation:
+			return "R4"
+		}
+		return "UNKNOWN"
+	}
+
+	// Not ABT-eligible: the sub-team model, where the table stops consulting
+	// whether a CRE team is assigned at all ("n/a" in every one of these rows).
+	switch {
+	case rc.Shift == ShiftLK:
+		return "R5"
+	case lkRotation:
+		return "R6"
+	case rc.Shift == ShiftUSA:
+		return "R11"
+	case rc.Shift == ShiftUSAWeekend:
+		return "R12"
+	}
+	return "UNKNOWN"
+}
+
 // Recipient is one person to call or email at a level.
 type Recipient struct {
 	Email string

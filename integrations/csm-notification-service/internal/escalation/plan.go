@@ -172,6 +172,32 @@ func BuildPlan(ctx context.Context, t Trigger, policies map[string]PriorityPolic
 	return plan, nil
 }
 
+// orNone renders an empty routing field as "none" rather than a blank gap —
+// an absent product or team is itself a section 12.0 erroneous scenario, so
+// the record should say so plainly.
+func orNone(v string) string {
+	if v == "" {
+		return "none"
+	}
+	return v
+}
+
+// LevelsClimbed lists the rungs this plan will actually reach, in order. It is
+// the shape of the ladder for this particular incident, which differs by rule:
+// a level with no reachable recipient is absent entirely, and LEVEL_0 exists
+// only for some rotations.
+func (p Plan) LevelsClimbed() []string {
+	seen := map[Level]bool{}
+	var out []string
+	for _, c := range p.Calls {
+		if !seen[c.Level] {
+			seen[c.Level] = true
+			out = append(out, c.Level.String())
+		}
+	}
+	return out
+}
+
 // Remaining returns the calls still due at or after `from` — what a ladder
 // would go on to place. Acknowledging an incident cancels exactly this set.
 func (p Plan) Remaining(from time.Time) []PlannedCall {
@@ -415,8 +441,17 @@ func (p Plan) WorkNote(placed []bool, cancelledAt *time.Time, reason string) str
 	const stamp = "2006-01-02 15:04:05"
 	var b strings.Builder
 	b.WriteString("Execution Summary Of the Escalation Flow\n\n")
-	b.WriteString(fmt.Sprintf("Incident Created/Priority Updated time: %s\n\n",
+	b.WriteString(fmt.Sprintf("Incident Created/Priority Updated time: %s\n",
 		p.Trigger.At.Format(stamp)))
+	// Which section 5.0 row selected these recipients, in the permanent
+	// record rather than only in a log line that ages out. "Why did this page
+	// the Americas leads and not ours" is answerable from the incident itself.
+	b.WriteString(fmt.Sprintf("Notification path: %s (shift %s, product %s, team %s, ABT-eligible %t)\n\n",
+		p.Trigger.Routing.Rule(),
+		orNone(string(p.Trigger.Routing.Shift)),
+		orNone(p.Trigger.Routing.Product),
+		orNone(p.Trigger.Routing.AssignedCRETeam),
+		p.Trigger.Routing.ABTEligible))
 	b.WriteString("Execution Summary:\n\n")
 	b.WriteString(strings.Join(p.ExecutionSummary(placed, cancelledAt, reason), "\n"))
 	return b.String()

@@ -206,11 +206,13 @@ func (e *Engine) start(ctx context.Context, t Trigger, replace bool) error {
 		// addresses (see internal/entity's do() doc comment). The work note
 		// is where the per-person detail belongs.
 		slog.WarnContext(ctx, "escalation: level cannot be called",
-			"incidentId", t.IncidentID, "level", issue.Level.String(), "reason", issue.Reason)
+			"incidentId", t.IncidentID, "rule", t.Routing.Rule(),
+			"level", issue.Level.String(), "reason", issue.Reason)
 	}
 	if len(plan.Calls) == 0 {
 		slog.WarnContext(ctx, "escalation: plan has no reachable recipients; nothing scheduled",
-			"incidentId", t.IncidentID, "priority", t.Priority)
+			"incidentId", t.IncidentID, "priority", t.Priority, "rule", t.Routing.Rule(),
+			"shift", string(t.Routing.Shift), "product", t.Routing.Product, "team", t.Routing.AssignedCRETeam)
 		return e.writeNote(ctx, plan, nil, nil, "")
 	}
 
@@ -243,9 +245,17 @@ func (e *Engine) start(ctx context.Context, t Trigger, replace bool) error {
 			return fmt.Errorf("escalation: schedule call %d for %s: %w", i, t.IncidentID, err)
 		}
 	}
+	// One line that answers "which ladder, and by which path" without anyone
+	// re-deriving section 5.0's table from four fields by hand. levels is the
+	// rungs this incident will actually climb, in order, which is the part
+	// that differs between rules — a USA_WEEKEND ABT incident has no LEVEL_0
+	// (R10) while its IAM counterpart does (R12).
 	slog.InfoContext(ctx, "escalation: ladder scheduled",
 		"incidentId", t.IncidentID, "priority", t.Priority, "trigger", string(t.Kind),
-		"shift", string(t.Routing.Shift), "calls", len(plan.Calls),
+		"rule", t.Routing.Rule(), "shift", string(t.Routing.Shift),
+		"product", t.Routing.Product, "team", t.Routing.AssignedCRETeam,
+		"abtEligible", t.Routing.ABTEligible,
+		"levels", plan.LevelsClimbed(), "calls", len(plan.Calls),
 		"finalLevelAt", t.At.Add(TimeToFinalLevel(policy, t.Routing.HasNotificationLevel())).Format(time.RFC3339))
 	return nil
 }
@@ -308,7 +318,10 @@ func (e *Engine) cancelBy(ctx context.Context, incidentID string, reason cancelR
 			return fmt.Errorf("escalation: stop ladder for %s: %w", incidentID, err)
 		}
 		slog.InfoContext(ctx, "escalation: ladder cancelled",
-			"incidentId", incidentID, "reason", string(reason), "cancelledCalls", len(pending))
+			"incidentId", incidentID, "reason", string(reason),
+			"rule", st.Plan.Trigger.Routing.Rule(), "priority", st.Plan.Trigger.Priority,
+			"reachedLevel", st.ReachedLevel(), "placedCalls", st.PlacedCount(),
+			"cancelledCalls", len(pending))
 	}
 
 	if err := e.writeNote(ctx, st.Plan, st.Placed, st.Cancelled, st.CancelReason); err != nil {
@@ -382,7 +395,9 @@ func (e *Engine) processDue(ctx context.Context, member string) error {
 			return err
 		}
 		slog.WarnContext(ctx, "escalation: ladder exhausted without acknowledgement",
-			"incidentId", incidentID, "priority", st.Plan.Trigger.Priority)
+			"incidentId", incidentID, "priority", st.Plan.Trigger.Priority,
+			"rule", st.Plan.Trigger.Routing.Rule(), "reachedLevel", st.ReachedLevel(),
+			"placedCalls", st.PlacedCount())
 		return e.store.Delete(ctx, incidentID)
 	}
 	return nil
@@ -392,12 +407,14 @@ func (e *Engine) processDue(ctx context.Context, member string) error {
 func (e *Engine) place(ctx context.Context, t Trigger, call PlannedCall) error {
 	if !e.cfg.CallSendingEnabled {
 		slog.InfoContext(ctx, "escalation: call sending disabled (CALL_SENDING_ENABLED=false); not calling",
-			"incidentId", t.IncidentID, "level", call.Level.String(), "attempt", call.Ordinal,
+			"incidentId", t.IncidentID, "rule", t.Routing.Rule(), "priority", t.Priority,
+			"level", call.Level.String(), "attempt", call.Ordinal,
 			"to", maskPhone(call.Recipient.Phone))
 		return nil
 	}
 	slog.InfoContext(ctx, "escalation: placing call",
-		"incidentId", t.IncidentID, "level", call.Level.String(), "attempt", call.Ordinal,
+		"incidentId", t.IncidentID, "rule", t.Routing.Rule(), "priority", t.Priority,
+		"level", call.Level.String(), "attempt", call.Ordinal,
 		"to", maskPhone(call.Recipient.Phone))
 	if e.cfg.UseSSML {
 		return e.calls.MakeSSMLCall(ctx, call.Recipient.Phone, t.VoiceSpeech())
