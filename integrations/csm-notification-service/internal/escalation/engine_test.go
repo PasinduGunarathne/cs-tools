@@ -139,6 +139,12 @@ func (f *fakeNotes) AppendWorkNote(_ context.Context, _, note string) error {
 }
 
 // testEngine wires an engine over the fakes above.
+// testClock is "now" for every engine test: the same instant the tests report
+// their incidents at, so a trigger is fresh rather than — as the real clock
+// would see a fixed 2026-09-09 date — days stale and dropped by start's
+// guard. Tests of that guard set their own clock.
+var testClock = ist(2026, 9, 9, 10, 0)
+
 func testEngine(store ladderStore, caller callPlacer, notes incidentNotes, cfg EngineConfig) *Engine {
 	return &Engine{
 		policies: DefaultPolicy,
@@ -147,6 +153,7 @@ func testEngine(store ladderStore, caller callPlacer, notes incidentNotes, cfg E
 		store:    store,
 		notes:    notes,
 		cfg:      cfg,
+		clock:    func() time.Time { return testClock },
 	}
 }
 
@@ -773,5 +780,61 @@ func TestEngine_SummaryReportsOnlyCallsActuallyPlaced(t *testing.T) {
 	}
 	if approxCalls <= calls {
 		t.Errorf("expected the flag-less approximation to over-report; got %d vs %d", approxCalls, calls)
+	}
+}
+
+// The first deployment of this engine replays the whole topic (its consumer
+// group is new, and eventbus reads a new group from the first offset), and a
+// DLQ retry or a long outage can hand it an old trigger any time after. A
+// trigger whose ladder has already run its course must be dropped, or the
+// next tick burst-dials every rung at once for an incident nobody is waiting
+// on.
+func TestEngine_TriggerOlderThanItsLadderIsDropped(t *testing.T) {
+	store, caller := newMemStore(), &fakeCaller{}
+	e := testEngine(store, caller, &fakeNotes{}, enabled())
+	reported := ist(2026, 9, 9, 10, 0)
+	// Consumed a day later: every one of P1's calls is long past.
+	e.clock = func() time.Time { return reported.Add(24 * time.Hour) }
+
+	if err := e.Handle(context.Background(), createdEvent(t, "CRITICAL", reported)); err != nil {
+		t.Fatalf("a stale trigger must be skipped, not errored: %v", err)
+	}
+	if len(store.states) != 0 || len(store.wakes) != 0 {
+		t.Errorf("a stale trigger scheduled a ladder: %d states, %d wakes", len(store.states), len(store.wakes))
+	}
+	if err := e.Tick(context.Background(), reported.Add(25*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if len(caller.placed) != 0 {
+		t.Errorf("a stale trigger dialled %d calls", len(caller.placed))
+	}
+}
+
+// A short backlog is the opposite case and must still work: the ladder is
+// measured from the report time precisely so that a delayed consume catches
+// up to the rung it should be on, rather than starting late.
+func TestEngine_ShortBacklogStillSchedulesTheRemainder(t *testing.T) {
+	store, caller := newMemStore(), &fakeCaller{}
+	e := testEngine(store, caller, &fakeNotes{}, enabled())
+	reported := ist(2026, 9, 9, 10, 0)
+	// Consumed ten minutes late: P1's LEVEL_1 has started, LEVEL_2..4 have not.
+	e.clock = func() time.Time { return reported.Add(10 * time.Minute) }
+
+	if err := e.Handle(context.Background(), createdEvent(t, "CRITICAL", reported)); err != nil {
+		t.Fatal(err)
+	}
+	st, found, _ := store.Get(context.Background(), testIncidentID)
+	if !found {
+		t.Fatal("a ten-minute backlog must still schedule the ladder")
+	}
+	if len(st.Plan.Calls) != 12 {
+		t.Errorf("scheduled %d calls, want the full 12; offsets are from the report time", len(st.Plan.Calls))
+	}
+	// The calls already due go out on the next tick, catching the ladder up.
+	if err := e.Tick(context.Background(), reported.Add(10*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if len(caller.placed) != 3 {
+		t.Errorf("placed %d calls on catch-up, want 3 (LEVEL_1's attempts at +6, +8, +10)", len(caller.placed))
 	}
 }

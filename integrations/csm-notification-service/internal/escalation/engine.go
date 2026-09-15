@@ -78,6 +78,17 @@ type Engine struct {
 	store    ladderStore
 	notes    incidentNotes
 	cfg      EngineConfig
+	// clock is time.Now unless a test substitutes one; the staleness check
+	// in start is the only thing that reads it, and it has to be testable
+	// against a trigger that is genuinely old.
+	clock func() time.Time
+}
+
+func (e *Engine) now() time.Time {
+	if e.clock != nil {
+		return e.clock()
+	}
+	return time.Now()
 }
 
 // NewEngine constructs an Engine. notes may be nil, in which case the
@@ -214,6 +225,24 @@ func (e *Engine) start(ctx context.Context, t Trigger, replace bool) error {
 			"incidentId", t.IncidentID, "priority", t.Priority, "rule", t.Routing.Rule(),
 			"shift", string(t.Routing.Shift), "product", t.Routing.Product, "team", t.Routing.AssignedCRETeam)
 		return e.writeNote(ctx, plan, nil, nil, "")
+	}
+
+	// A ladder whose every call is already in the past has nothing left to
+	// do, and scheduling it anyway would burst-dial the whole thing on the
+	// next tick. That is not hypothetical: this engine's consumer group reads
+	// the topic from its beginning the first time it exists (eventbus sets
+	// StartOffset to FirstOffset), so the first deployment replays every
+	// trigger still in retention — and a redelivery, a DLQ retry or a long
+	// consumer outage can all hand it an old trigger later. Every call is an
+	// offset from the trigger time on purpose, so a *short* backlog still
+	// catches up correctly (the due calls go out on the next tick, at the
+	// rung the ladder should be on by now); it is the ladder that has run
+	// its whole course before we heard about it that must be dropped.
+	if last := plan.Calls[len(plan.Calls)-1]; last.At.Before(e.now()) {
+		slog.WarnContext(ctx, "escalation: trigger is older than its whole ladder; not scheduling",
+			"incidentId", t.IncidentID, "priority", t.Priority, "trigger", string(t.Kind),
+			"triggeredAt", t.At.Format(time.RFC3339), "lastCallAt", last.At.Format(time.RFC3339))
+		return nil
 	}
 
 	st := LadderState{Plan: plan, Placed: make([]bool, len(plan.Calls))}

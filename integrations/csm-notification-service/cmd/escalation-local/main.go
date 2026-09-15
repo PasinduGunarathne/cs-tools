@@ -318,29 +318,42 @@ func localRoster(to string) escalation.Roster {
 
 // triggerTime picks an instant inside the requested shift, so the engine's own
 // ShiftAt derives the shift under test rather than whatever the wall clock
-// happens to be. Anchored to a fixed reference week so a run is reproducible.
+// happens to be.
+//
+// It is the NEXT such instant, never a past one. The engine drops a trigger
+// whose whole ladder is already over — the guard that stops a topic replay
+// from burst-dialling stale incidents — so a fixed reference date days in the
+// past would be refused. A trigger a few hours ahead is fine: every call is an
+// offset from it, and runTicks feeds the engine a "now" measured from it.
 func triggerTime(shift escalation.Shift) time.Time {
-	// 2026-09-09 is a Wednesday; 2026-09-12 a Saturday.
-	weekday := func(hour int) time.Time {
-		return time.Date(2026, 9, 9, hour, 0, 0, 0, escalation.IST)
-	}
-	weekend := func(hour int) time.Time {
-		return time.Date(2026, 9, 12, hour, 0, 0, 0, escalation.IST)
-	}
+	hour, weekend := 11, false
 	switch shift {
 	case escalation.ShiftLKMorning:
-		return weekday(7)
+		hour = 7
 	case escalation.ShiftLKEvening:
-		return weekday(19)
+		hour = 19
 	case escalation.ShiftUSA:
-		return weekday(22)
+		hour = 22
 	case escalation.ShiftLKWeekend:
-		return weekend(10)
+		hour, weekend = 10, true
 	case escalation.ShiftUSAWeekend:
-		return weekend(22)
-	default: // ShiftLK, business hours
-		return weekday(11)
+		hour, weekend = 22, true
 	}
+	now := time.Now().In(escalation.IST)
+	for day := 0; day < 8; day++ {
+		d := now.AddDate(0, 0, day)
+		isWeekend := d.Weekday() == time.Saturday || d.Weekday() == time.Sunday
+		if isWeekend != weekend {
+			continue
+		}
+		at := time.Date(d.Year(), d.Month(), d.Day(), hour, 0, 0, 0, escalation.IST)
+		if at.After(now) {
+			return at
+		}
+	}
+	// Unreachable: eight days always contain both a weekday and a weekend
+	// day with the hour still ahead.
+	return now
 }
 
 // startRecord builds the incident.created or incident.priority_elevated

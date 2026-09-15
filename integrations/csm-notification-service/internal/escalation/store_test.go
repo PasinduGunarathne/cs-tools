@@ -38,16 +38,30 @@ import (
 //	docker run --rm -p 6379:6379 redis
 //	go test ./internal/escalation/ -run TestStore -v
 //
-// REDIS_ADDR overrides the address.
+// REDIS_URL (a rediss:// connection string, as main.go reads it) takes
+// precedence, then REDIS_ADDR — the same order the service itself uses, so
+// these can run against the managed instance a deployment will actually use
+// and not only a local container. Every key they write is namespaced and
+// removed on the way out.
 func testStore(t *testing.T) (*Store, func()) {
 	t.Helper()
-	addr := os.Getenv("REDIS_ADDR")
-	if addr == "" {
-		addr = "localhost:6379"
+	var rdb *redis.Client
+	addr := "localhost:6379"
+	if url := os.Getenv("REDIS_URL"); url != "" {
+		opts, err := redis.ParseURL(url)
+		if err != nil {
+			t.Skip("REDIS_URL is set but does not parse; skipping")
+		}
+		addr = opts.Addr
+		rdb = redis.NewClient(opts)
+	} else {
+		if a := os.Getenv("REDIS_ADDR"); a != "" {
+			addr = a
+		}
+		rdb = redis.NewClient(&redis.Options{Addr: addr})
 	}
-	rdb := redis.NewClient(&redis.Options{Addr: addr})
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
 	defer cancel()
 	if err := rdb.Ping(ctx).Err(); err != nil {
 		_ = rdb.Close()
