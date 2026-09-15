@@ -105,7 +105,7 @@ just a bool, either `"true"` or not. `NewRouter` returns the constructed
 threaded through `server.New` to `cmd/api/main.go`, which calls `Close()` on
 it during shutdown, after `srv.Shutdown`.
 
-Seven call sites publish today, all ServiceNow-data-source-only (`DATA_SOURCE=servicenow`;
+Ten call sites publish today, all ServiceNow-data-source-only (`DATA_SOURCE=servicenow`;
 there is no Postgres-backed equivalent for any of them). There is also one
 Postgres-only, currently-inert exception: `caseService.UpdateCase`
 (`case_service.go`) detects when a severity update crosses the LOW boundary
@@ -152,10 +152,24 @@ easy to wire up for real once both exist.
   `csm-notification-service`'s `events.Validate` would reject anyway for an
   empty `recipients` list.
 - **`snIncidentService.CreateIncident`** publishes `incident.created` via
-  `publishIncidentCreated`, called the same way. No enrichment round trip is
-  needed here: `req.Subject`/`req.AdditionalComments` already carry
-  everything the payload needs (`Title`/`ShortDescription`, the latter
-  falling back to `Subject` when `AdditionalComments` is absent). This
+  `publishIncidentCreated`, called the same way. `Title`/`ShortDescription`
+  come straight from `req.Subject`/`req.AdditionalComments` (the latter
+  falling back to `Subject` when absent), and `Number`/`ReportedAt` from the
+  create response. The **escalation fields** need one best-effort
+  `GetIncidentByID` read: `csm-notification-service`'s call-escalation ladder
+  (its `internal/escalation`) is keyed on the incident's *priority*, which
+  ServiceNow derives from impact and urgency and which neither `req` nor the
+  create response carries, and on the assigned team's display name, where
+  `req` has only a sys_id. That read is deliberately not fatal and not even
+  required: if it fails, the event goes out with exactly the fields it
+  carried before the ladder existed (every escalation field is `omitempty`
+  on both sides), the consumer's Chat alert and direct call still happen,
+  and the ladder simply doesn't start — losing the alert would be strictly
+  worse than losing the ladder. `Account`/`ABTEligible` are declared on the
+  payload but **never populated** here: incidents have no account field in
+  this domain model, and this service has no product→BU mapping to derive
+  ABT eligibility from — see that service's own `CLAUDE.md` for what the
+  missing flag does to the USA_WEEKEND routing rule. This
   service does not build or send an `IncidentLink` at all — this stays
   strictly a publisher of the fact that an incident was created, nothing
   more; `csm-notification-service` builds its own "Open in Portal" link
@@ -200,6 +214,41 @@ easy to wire up for real once both exist.
   renders a distinct email layout for it (`RenderInternalNoteEmail`, see
   that service's own `CLAUDE.md`), so it needs to know the comment's type,
   not just receive an already-filtered recipient list.
+
+- **`snIncidentService.UpdateIncident`** publishes the two signals that
+  start and stop a call escalation, via `publishEscalationSignals`:
+  `incident.acknowledged` when the incident genuinely **leaves NEW** (the
+  specification's acknowledgement gesture for a newly reported incident), and
+  `incident.priority_elevated` when its priority **strictly increases in
+  urgency** (the second trigger, keyed on the new priority). Both are guarded
+  against a no-op re-PATCH the same way `publishSeverityChanged` is, which
+  needs the incident as it was *before* the PATCH — so `UpdateIncident`
+  fetches a baseline first, but only when the request touches `State` or
+  `Priority`, so every other PATCH pays no extra round trip. A failed
+  baseline fetch publishes nothing rather than guessing at a transition. The
+  elevated payload carries the same optional escalation fields as
+  `incident.created`, from the post-PATCH view, plus `ElevatedAt` (`now`,
+  the instant the ladder's offsets run from). Neither carries an actor:
+  `UpdateIncidentRequest` has none and this service cannot resolve who
+  performed an update.
+- **`snCommentSearchService.CreateComment`** (the reference-generic comment
+  service, ServiceNow branch only) publishes `incident.comment_added` via
+  `publishIncidentCommentAdded` whenever a comment lands on an
+  `incident`-type reference. This is the **only** stop signal an
+  elevation-triggered ladder has: the specification's acknowledgement gesture
+  for a priority elevation is a *public comment*, and an elevated incident
+  has normally already left NEW, so `incident.acknowledged` can never fire
+  for it again. Work notes are published too, with `IsPublic: false` — the
+  consumer decides that only a public comment acknowledges, keeping the event
+  a statement of fact rather than baking a notification policy into the
+  service that owns the data. The payload carries **no author**, a recorded
+  known gap: incidents have no customer-portal surface today, so a public
+  comment on one is written by internal staff in practice; if that ever
+  changes, an author must be added and checked (see
+  `snCaseService.resolveCommentAuthor` for the lookup it would need). The
+  comment service gained an optional `publisher EventPublisherService` for
+  this, wired from `routes.go`'s existing `eventPublisher`; the Postgres
+  comment service publishes nothing, same as every other publisher here.
 
 `publishCaseCreated`, `publishCommentAdded`, `publishStatusChanged`, and
 `publishCaseAssigned` — every `case.*` publisher above, not
