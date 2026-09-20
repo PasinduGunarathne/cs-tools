@@ -203,7 +203,13 @@ func Validate(entityID string, t Type, raw json.RawMessage) error {
 		if err := decodeStrict(raw, &p); err != nil {
 			return err
 		}
-		if p.CommentID == "" {
+		// entityID is the incident id, and the only thing that ties this
+		// comment to the ladder it might stop — the engine looks the ladder
+		// up by it. An event without one cannot cancel anything, and being
+		// accepted would see it quietly marked handled. CommentID is required
+		// for the execution summary, which records which comment stopped the
+		// ladder.
+		if entityID == "" || p.CommentID == "" {
 			return fmt.Errorf("events: missing required field for %s", t)
 		}
 		// IsPublic is deliberately not validated: false is a legitimate value

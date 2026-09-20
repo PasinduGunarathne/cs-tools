@@ -317,11 +317,17 @@ type IncidentCreatedPayload struct {
 	// version: this service has no product-to-Chat-space mapping and no
 	// on-call paging system of its own, so it has never supplied either and
 	// the consumer substitutes its own configured defaults.
-	Number      string `json:"number,omitempty"`
-	Priority    string `json:"priority,omitempty"`
-	Account     string `json:"account,omitempty"`
-	Team        string `json:"team,omitempty"`
-	ABTEligible bool   `json:"abtEligible,omitempty"`
+	Number   string `json:"number,omitempty"`
+	Priority string `json:"priority,omitempty"`
+	Account  string `json:"account,omitempty"`
+	Team     string `json:"team,omitempty"`
+	// ABTEligible is a POINTER so an absent value stays absent on the wire.
+	// It splits the consumer's rule table in half — the ABT rows against the
+	// sub-team ones — so "not told" is a different situation from "told no",
+	// and it is the situation today: this service has no product-to-BU
+	// mapping and never sets it. Sending false would claim an answer nobody
+	// gave. Keep in sync with csm-notification-service's own payload.
+	ABTEligible *bool `json:"abtEligible,omitempty"`
 	// ReportedAt is when the incident was opened, RFC3339. Every call in the
 	// ladder is an offset from this rather than from consume time, so a
 	// backlogged consumer cannot shift the whole ladder later than the
@@ -447,7 +453,7 @@ type IncidentPriorityElevatedPayload struct {
 	Number      string `json:"number,omitempty"`
 	Account     string `json:"account,omitempty"`
 	Team        string `json:"team,omitempty"`
-	ABTEligible bool   `json:"abtEligible,omitempty"`
+	ABTEligible *bool  `json:"abtEligible,omitempty"`
 	// ElevatedAt is when the priority actually changed, RFC3339.
 	ElevatedAt string `json:"elevatedAt,omitempty"`
 }

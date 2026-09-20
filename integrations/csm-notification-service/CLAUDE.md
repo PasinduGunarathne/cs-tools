@@ -145,6 +145,13 @@ ticker, with Redis as its only durable state — the same `REDIS_URL`/
   whether LEVEL_0 exists: rotation shifts only, **and on USA_WEEKEND only when
   not ABT-eligible** (rule R10 has no notification level, R12/R14 do — the one
   input that changes the ladder's shape rather than who answers).
+  `ABTEligible` is a `*bool` in both the payload and the routing context,
+  because there are three states: eligibility splits the rule table in half,
+  so "nobody told us" is genuinely different from "told no" — and it is the
+  common case, since no publisher sets it. Unknown reports the rule as
+  `UNKNOWN_ABT` rather than a confident wrong row, and keeps LEVEL_0 on a
+  USA_WEEKEND rotation (waking one extra person is the recoverable error;
+  dropping the fastest rung on a weekend night is not).
   `RoutingContext.Rule` names which of section 5.0's fourteen rows an incident
   routes by; nothing branches on it, it exists so the path is *reportable* —
   it's in the schedule log line, every placed call, both endings, and the work
@@ -208,9 +215,9 @@ covers an environment, or an incident gets both.
 erroneous-scenario emails (section 12.0), LEVEL_0 availability filtering
 (section 8.0), a ServiceNow-backed `Resolver`. **Never populated by any
 publisher**: `abtEligible` (entity-service has no product→BU mapping), so
-every USA_WEEKEND incident takes the R12 branch and gets a LEVEL_0 — the
-engine warns on exactly that branch — and `account` (incidents have no
-account field; the voice message skips the sentence).
+every incident currently routes as `UNKNOWN_ABT` and the engine warns once per
+ladder — and `account` (incidents have no account field; the voice message
+skips the sentence).
 
 **Testing**: `cmd/escalation-local` runs the *real* engine against a real
 Redis with the real Twilio client pointed at a local stub (or at Twilio with

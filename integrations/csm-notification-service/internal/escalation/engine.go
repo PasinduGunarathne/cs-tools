@@ -202,11 +202,16 @@ func (e *Engine) start(ctx context.Context, t Trigger, replace bool) error {
 	// product-to-ABT mapping, so the field arrives false and this shift always
 	// takes the R12 branch. A bool cannot distinguish "not eligible" from
 	// "nobody told us", so the mis-branch is announced rather than hidden.
-	if t.Routing.Shift == ShiftUSAWeekend && !t.Routing.ABTEligible {
-		slog.WarnContext(ctx, "escalation: USA_WEEKEND ladder assuming not ABT-eligible (R12); "+
-			"LEVEL_0 is included. If this incident's product is ABT-eligible, R10 defines no LEVEL_0 "+
-			"and the publisher must send abtEligible",
-			"incidentId", t.IncidentID, "product", t.Routing.Product)
+	if !t.Routing.abtKnown() {
+		// Not a detail: eligibility selects which half of section 5.0's table
+		// an incident routes by, so without it the rule is unnamed and the
+		// recipients are whatever the roster's fallback tier happens to hold.
+		// On USA_WEEKEND it also decides whether LEVEL_0 exists at all.
+		slog.WarnContext(ctx, "escalation: no ABT eligibility on this incident; "+
+			"the section 5.0 rule cannot be named and routing falls back",
+			"incidentId", t.IncidentID, "product", t.Routing.Product,
+			"shift", string(t.Routing.Shift),
+			"level0Included", t.Routing.HasNotificationLevel())
 	}
 
 	plan, err := BuildPlan(ctx, t, e.policies, e.resolver)
@@ -285,7 +290,7 @@ func (e *Engine) start(ctx context.Context, t Trigger, replace bool) error {
 		"incidentId", t.IncidentID, "priority", t.Priority, "trigger", string(t.Kind),
 		"rule", t.Routing.Rule(), "shift", string(t.Routing.Shift),
 		"product", t.Routing.Product, "team", t.Routing.AssignedCRETeam,
-		"abtEligible", t.Routing.ABTEligible,
+		"abtEligible", t.Routing.ABTEligibility(),
 		"levels", plan.LevelsClimbed(), "calls", len(plan.Calls),
 		"finalLevelAt", t.At.Add(TimeToFinalLevel(policy, t.Routing.HasNotificationLevel())).Format(time.RFC3339))
 	return nil

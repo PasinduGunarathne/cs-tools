@@ -38,19 +38,25 @@ import (
 // rung multiplies the calls at that rung, and nothing else.
 
 // routingFor is every rule's inputs, as the table states them.
+//
+// The sub-team rows state eligibility explicitly rather than leaning on a zero
+// value: "ABT: No" is an answer the table gives, and since the field became
+// presence-aware, leaving it unset would mean "nobody said" — which routes to
+// no row at all. The no-product rows (R7, R8, R13, R14) genuinely do not
+// consult it, and leave it unset for that reason.
 var routingFor = map[string]RoutingContext{
-	"R1":  {Product: "WSO2 API Manager", ABTEligible: true, AssignedCRETeam: "Atlas", Shift: ShiftLK},
-	"R2":  {Product: "WSO2 API Manager", ABTEligible: true, AssignedCRETeam: "Atlas", Shift: ShiftLKMorning},
-	"R3":  {Product: "WSO2 API Manager", ABTEligible: true, Shift: ShiftLK},
-	"R4":  {Product: "WSO2 API Manager", ABTEligible: true, Shift: ShiftLKEvening},
-	"R5":  {Product: "WSO2 Identity Server", Shift: ShiftLK},
-	"R6":  {Product: "WSO2 Identity Server", Shift: ShiftLKWeekend},
+	"R1":  {Product: "WSO2 API Manager", ABTEligible: abtYes(), AssignedCRETeam: "Atlas", Shift: ShiftLK},
+	"R2":  {Product: "WSO2 API Manager", ABTEligible: abtYes(), AssignedCRETeam: "Atlas", Shift: ShiftLKMorning},
+	"R3":  {Product: "WSO2 API Manager", ABTEligible: abtYes(), Shift: ShiftLK},
+	"R4":  {Product: "WSO2 API Manager", ABTEligible: abtYes(), Shift: ShiftLKEvening},
+	"R5":  {Product: "WSO2 Identity Server", ABTEligible: abtNo(), Shift: ShiftLK},
+	"R6":  {Product: "WSO2 Identity Server", ABTEligible: abtNo(), Shift: ShiftLKWeekend},
 	"R7":  {Shift: ShiftLK},
 	"R8":  {Shift: ShiftLKMorning},
-	"R9":  {Product: "WSO2 API Manager", ABTEligible: true, Shift: ShiftUSA},
-	"R10": {Product: "WSO2 API Manager", ABTEligible: true, Shift: ShiftUSAWeekend},
-	"R11": {Product: "WSO2 Identity Server", Shift: ShiftUSA},
-	"R12": {Product: "WSO2 Identity Server", Shift: ShiftUSAWeekend},
+	"R9":  {Product: "WSO2 API Manager", ABTEligible: abtYes(), Shift: ShiftUSA},
+	"R10": {Product: "WSO2 API Manager", ABTEligible: abtYes(), Shift: ShiftUSAWeekend},
+	"R11": {Product: "WSO2 Identity Server", ABTEligible: abtNo(), Shift: ShiftUSA},
+	"R12": {Product: "WSO2 Identity Server", ABTEligible: abtNo(), Shift: ShiftUSAWeekend},
 	"R13": {Shift: ShiftUSA},
 	"R14": {Shift: ShiftUSAWeekend},
 }

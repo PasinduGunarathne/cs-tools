@@ -470,12 +470,12 @@ func (p Plan) WorkNote(placed []bool, failed []string, cancelledAt *time.Time, r
 	// Which section 5.0 row selected these recipients, in the permanent
 	// record rather than only in a log line that ages out. "Why did this page
 	// the Americas leads and not ours" is answerable from the incident itself.
-	b.WriteString(fmt.Sprintf("Notification path: %s (shift %s, product %s, team %s, ABT-eligible %t)\n\n",
+	b.WriteString(fmt.Sprintf("Notification path: %s (shift %s, product %s, team %s, ABT-eligible %s)\n\n",
 		p.Trigger.Routing.Rule(),
 		orNone(string(p.Trigger.Routing.Shift)),
 		orNone(p.Trigger.Routing.Product),
 		orNone(p.Trigger.Routing.AssignedCRETeam),
-		p.Trigger.Routing.ABTEligible))
+		p.Trigger.Routing.ABTEligibility()))
 	b.WriteString("Execution Summary:\n\n")
 	b.WriteString(strings.Join(p.ExecutionSummary(placed, failed, cancelledAt, reason), "\n"))
 	return b.String()

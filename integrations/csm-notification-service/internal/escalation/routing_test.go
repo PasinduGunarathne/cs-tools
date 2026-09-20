@@ -18,8 +18,11 @@ package escalation
 
 import (
 	"context"
+	"encoding/json"
 	"strconv"
 	"testing"
+
+	"github.com/wso2-open-operations/cs-tools/integrations/csm-notification-service/internal/events"
 )
 
 // Section 6.0's matrix and section 5.0's rule table agree that LEVEL_0 on
@@ -46,7 +49,7 @@ func TestHasNotificationLevel_MatchesTheRuleTable(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.rule, func(t *testing.T) {
-			rc := RoutingContext{Shift: tc.shift, ABTEligible: tc.abtEligible}
+			rc := RoutingContext{Shift: tc.shift, ABTEligible: abtFor(tc.abtEligible)}
 			if got := rc.HasNotificationLevel(); got != tc.want {
 				t.Errorf("%s: HasNotificationLevel() = %v, want %v", tc.rule, got, tc.want)
 			}
@@ -57,7 +60,7 @@ func TestHasNotificationLevel_MatchesTheRuleTable(t *testing.T) {
 // The rule above has to reach the plan, not just the predicate.
 func TestBuildPlan_ABTEligibleUSAWeekendStartsAtLevel1(t *testing.T) {
 	tr := testTrigger("P2", ShiftUSAWeekend)
-	tr.Routing.ABTEligible = true
+	tr.Routing.ABTEligible = abtYes()
 	plan, err := BuildPlan(context.Background(), tr, DefaultPolicy, fullResolver())
 	if err != nil {
 		t.Fatal(err)
@@ -66,7 +69,7 @@ func TestBuildPlan_ABTEligibleUSAWeekendStartsAtLevel1(t *testing.T) {
 		t.Errorf("first call is %s, want LEVEL_1 (R10 defines no notification level)", plan.Calls[0].Level)
 	}
 
-	tr.Routing.ABTEligible = false
+	tr.Routing.ABTEligible = abtNo()
 	plan, err = BuildPlan(context.Background(), tr, DefaultPolicy, fullResolver())
 	if err != nil {
 		t.Fatal(err)
@@ -197,34 +200,35 @@ func TestRule_CoversTheWholeTable(t *testing.T) {
 		rc   RoutingContext
 	}{
 		// Integration / ABT-eligible, a CRE team assigned.
-		{"R1", RoutingContext{Product: product, ABTEligible: true, AssignedCRETeam: team, Shift: ShiftLK}},
-		{"R2", RoutingContext{Product: product, ABTEligible: true, AssignedCRETeam: team, Shift: ShiftLKMorning}},
-		{"R2", RoutingContext{Product: product, ABTEligible: true, AssignedCRETeam: team, Shift: ShiftLKEvening}},
-		{"R2", RoutingContext{Product: product, ABTEligible: true, AssignedCRETeam: team, Shift: ShiftLKWeekend}},
+		{"R1", RoutingContext{Product: product, ABTEligible: abtYes(), AssignedCRETeam: team, Shift: ShiftLK}},
+		{"R2", RoutingContext{Product: product, ABTEligible: abtYes(), AssignedCRETeam: team, Shift: ShiftLKMorning}},
+		{"R2", RoutingContext{Product: product, ABTEligible: abtYes(), AssignedCRETeam: team, Shift: ShiftLKEvening}},
+		{"R2", RoutingContext{Product: product, ABTEligible: abtYes(), AssignedCRETeam: team, Shift: ShiftLKWeekend}},
 		// ABT-eligible, no team — the pooled rows.
-		{"R3", RoutingContext{Product: product, ABTEligible: true, Shift: ShiftLK}},
-		{"R4", RoutingContext{Product: product, ABTEligible: true, Shift: ShiftLKEvening}},
-		// Sub-team model: the table stops consulting the team entirely.
-		{"R5", RoutingContext{Product: product, Shift: ShiftLK}},
-		{"R5", RoutingContext{Product: product, AssignedCRETeam: team, Shift: ShiftLK}},
-		{"R6", RoutingContext{Product: product, Shift: ShiftLKMorning}},
+		{"R3", RoutingContext{Product: product, ABTEligible: abtYes(), Shift: ShiftLK}},
+		{"R4", RoutingContext{Product: product, ABTEligible: abtYes(), Shift: ShiftLKEvening}},
+		// Sub-team model: the table stops consulting the team entirely, but
+		// eligibility is still an explicit "No" rather than an absence.
+		{"R5", RoutingContext{Product: product, ABTEligible: abtNo(), Shift: ShiftLK}},
+		{"R5", RoutingContext{Product: product, ABTEligible: abtNo(), AssignedCRETeam: team, Shift: ShiftLK}},
+		{"R6", RoutingContext{Product: product, ABTEligible: abtNo(), Shift: ShiftLKMorning}},
 		// No product at all — section 12.0's erroneous scenario.
 		{"R7", RoutingContext{Shift: ShiftLK}},
 		{"R8", RoutingContext{Shift: ShiftLKWeekend}},
 		{"R13", RoutingContext{Shift: ShiftUSA}},
 		{"R14", RoutingContext{Shift: ShiftUSAWeekend}},
 		// Americas.
-		{"R9", RoutingContext{Product: product, ABTEligible: true, Shift: ShiftUSA}},
-		{"R10", RoutingContext{Product: product, ABTEligible: true, Shift: ShiftUSAWeekend}},
-		{"R11", RoutingContext{Product: product, Shift: ShiftUSA}},
-		{"R12", RoutingContext{Product: product, Shift: ShiftUSAWeekend}},
+		{"R9", RoutingContext{Product: product, ABTEligible: abtYes(), Shift: ShiftUSA}},
+		{"R10", RoutingContext{Product: product, ABTEligible: abtYes(), Shift: ShiftUSAWeekend}},
+		{"R11", RoutingContext{Product: product, ABTEligible: abtNo(), Shift: ShiftUSA}},
+		{"R12", RoutingContext{Product: product, ABTEligible: abtNo(), Shift: ShiftUSAWeekend}},
 	}
 	seen := map[string]bool{}
 	for _, tc := range tests {
 		t.Run(tc.want+"/"+string(tc.rc.Shift), func(t *testing.T) {
 			if got := tc.rc.Rule(); got != tc.want {
-				t.Errorf("Rule() = %s, want %s (product=%q abt=%t team=%q shift=%s)",
-					got, tc.want, tc.rc.Product, tc.rc.ABTEligible, tc.rc.AssignedCRETeam, tc.rc.Shift)
+				t.Errorf("Rule() = %s, want %s (product=%q abt=%s team=%q shift=%s)",
+					got, tc.want, tc.rc.Product, tc.rc.ABTEligibility(), tc.rc.AssignedCRETeam, tc.rc.Shift)
 			}
 		})
 		seen[tc.want] = true
@@ -239,7 +243,7 @@ func TestRule_CoversTheWholeTable(t *testing.T) {
 // An unrecognised shift has no row, and reporting the wrong path is worse than
 // admitting there is none.
 func TestRule_UnknownShift(t *testing.T) {
-	rc := RoutingContext{Product: "WSO2 API Manager", ABTEligible: true, Shift: Shift("MARS")}
+	rc := RoutingContext{Product: "WSO2 API Manager", ABTEligible: abtYes(), Shift: Shift("MARS")}
 	if got := rc.Rule(); got != "UNKNOWN" {
 		t.Errorf("Rule() = %s, want UNKNOWN", got)
 	}
@@ -248,13 +252,85 @@ func TestRule_UnknownShift(t *testing.T) {
 // R10 and R12 differ only by ABT eligibility, and that difference is exactly
 // the LEVEL_0 rule — so the reported path and the scheduled ladder must agree.
 func TestRule_AgreesWithTheLevel0Rule(t *testing.T) {
-	abt := RoutingContext{Product: "WSO2 API Manager", ABTEligible: true, Shift: ShiftUSAWeekend}
-	iam := RoutingContext{Product: "WSO2 Identity Server", Shift: ShiftUSAWeekend}
+	abt := RoutingContext{Product: "WSO2 API Manager", ABTEligible: abtYes(), Shift: ShiftUSAWeekend}
+	iam := RoutingContext{Product: "WSO2 Identity Server", ABTEligible: abtNo(), Shift: ShiftUSAWeekend}
 
 	if abt.Rule() != "R10" || abt.HasNotificationLevel() {
 		t.Errorf("R10 must have no notification level: rule=%s level0=%t", abt.Rule(), abt.HasNotificationLevel())
 	}
 	if iam.Rule() != "R12" || !iam.HasNotificationLevel() {
 		t.Errorf("R12 must have a notification level: rule=%s level0=%t", iam.Rule(), iam.HasNotificationLevel())
+	}
+}
+
+// abtYes and abtNo state a definite eligibility. Tests that mean "nobody told
+// us" leave the field nil, which is its own case.
+func abtYes() *bool { yes := true; return &yes }
+func abtNo() *bool  { no := false; return &no }
+
+// abtFor turns a table-driven bool into the definite value the routing
+// context now carries.
+func abtFor(eligible bool) *bool { return &eligible }
+
+// Nobody has told us whether the account is ABT-eligible — the situation in
+// production today, since no publisher populates the field. That is a third
+// state, not a "no": eligibility splits section 5.0's table in half, so the
+// row genuinely cannot be named, and saying "R12" would read as a decision
+// that was made rather than one that was missed.
+func TestRule_UnknownEligibilityIsNotAnAnswer(t *testing.T) {
+	rc := RoutingContext{Product: "WSO2 API Manager", AssignedCRETeam: "Atlas", Shift: ShiftLK}
+	if got := rc.Rule(); got != "UNKNOWN_ABT" {
+		t.Errorf("Rule() = %s, want UNKNOWN_ABT when nobody supplied eligibility", got)
+	}
+	if got := rc.ABTEligibility(); got != "unknown" {
+		t.Errorf("ABTEligibility() = %q, want unknown", got)
+	}
+
+	// An explicit no is a different thing and still names its row.
+	rc.ABTEligible = abtNo()
+	if got := rc.Rule(); got != "R5" {
+		t.Errorf("Rule() = %s, want R5 for an explicit sub-team answer", got)
+	}
+}
+
+// With eligibility unknown on a USA_WEEKEND rotation, the notification level
+// is included. The two errors are not symmetric: including it wrongly wakes
+// one rotation member who was not on the hook and costs the ladder nothing,
+// while omitting it wrongly removes the first and fastest rung from an
+// unattended incident on a weekend night.
+func TestHasNotificationLevel_UnknownEligibilityKeepsLevel0(t *testing.T) {
+	unknown := RoutingContext{Product: "WSO2 API Manager", Shift: ShiftUSAWeekend}
+	if !unknown.HasNotificationLevel() {
+		t.Error("LEVEL_0 was dropped on an unclassified weekend-night incident")
+	}
+	// A definite yes is what removes it, per R10.
+	unknown.ABTEligible = abtYes()
+	if unknown.HasNotificationLevel() {
+		t.Error("R10 defines no notification level; a definite yes must drop it")
+	}
+}
+
+// The presence-aware field has to survive the wire, or the distinction it
+// exists for is lost the moment the event is published.
+func TestABTEligibility_SurvivesJSON(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{"omitted", `{}`, "unknown"},
+		{"explicit true", `{"abtEligible":true}`, "yes"},
+		{"explicit false", `{"abtEligible":false}`, "no"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var p events.IncidentCreatedPayload
+			if err := json.Unmarshal([]byte(tc.raw), &p); err != nil {
+				t.Fatal(err)
+			}
+			rc := RoutingContext{ABTEligible: p.ABTEligible}
+			if got := rc.ABTEligibility(); got != tc.want {
+				t.Errorf("%s decoded to %q, want %q", tc.raw, got, tc.want)
+			}
+		})
 	}
 }

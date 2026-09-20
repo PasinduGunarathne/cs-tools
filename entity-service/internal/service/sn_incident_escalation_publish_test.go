@@ -157,8 +157,12 @@ func TestPublishIncidentCreated_LeavesUnsourcedFieldsEmpty(t *testing.T) {
 	if p.Account != "" {
 		t.Errorf("account = %q; incidents have no account field to read one from", p.Account)
 	}
-	if p.ABTEligible {
-		t.Error("abtEligible is true; this service has no product-to-BU mapping to derive it from")
+	// Absent, not false: this service has no product-to-BU mapping to derive
+	// it from, and sending false would claim an answer nobody gave. The
+	// consumer treats an absence as "unknown" and says so rather than routing
+	// as though someone had decided.
+	if p.ABTEligible != nil {
+		t.Errorf("abtEligible = %v; it must be absent, not an answer", *p.ABTEligible)
 	}
 }
 
@@ -340,5 +344,100 @@ func TestPublishIncidentPriorityElevated_DowngradePublishesNothing(t *testing.T)
 	}
 	if _, published := findPublishCall(publisher.calls, events.TypeIncidentPriorityElevated); published {
 		t.Error("a downgrade started a ladder")
+	}
+}
+
+// ServiceNow derives priority from impact and urgency — CreateIncident
+// requires both and accepts no priority at all. An update that raises urgency
+// therefore raises the priority just as surely as one naming it, and gating
+// the elevation check on req.Priority alone meant that update published
+// nothing and no ladder ever started.
+func TestPublishIncidentPriorityElevated_RaisedByUrgencyAlone(t *testing.T) {
+	client := newTestIncidentElevationClient(t, 3, 1)
+	publisher := &mockEventPublisher{}
+	svc := NewServiceNowIncidentService(client, publisher)
+
+	urgency := domain.IncidentUrgencyHigh
+	if _, err := svc.UpdateIncident(contextWithUserIDToken("token"), domain.UpdateIncidentRequest{
+		ID:      testIncidentUUID,
+		Urgency: &urgency,
+	}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var p events.IncidentPriorityElevatedPayload
+	if err := json.Unmarshal(findPublished(t, publisher.calls, events.TypeIncidentPriorityElevated).payload, &p); err != nil {
+		t.Fatal(err)
+	}
+	if p.NewPriority != "CRITICAL" {
+		t.Errorf("newPriority = %q, want CRITICAL", p.NewPriority)
+	}
+}
+
+// The same for impact, the other half of the derivation.
+func TestPublishIncidentPriorityElevated_RaisedByImpactAlone(t *testing.T) {
+	client := newTestIncidentElevationClient(t, 3, 1)
+	publisher := &mockEventPublisher{}
+	svc := NewServiceNowIncidentService(client, publisher)
+
+	impact := domain.IncidentImpactHigh
+	if _, err := svc.UpdateIncident(contextWithUserIDToken("token"), domain.UpdateIncidentRequest{
+		ID:     testIncidentUUID,
+		Impact: &impact,
+	}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, published := findPublishCall(publisher.calls, events.TypeIncidentPriorityElevated); !published {
+		t.Error("an impact change that raised the priority published nothing")
+	}
+}
+
+// An impact or urgency change that leaves the derived priority alone must
+// still publish nothing — the comparison is against the real priorities, not
+// against which fields the request happened to name.
+func TestPublishIncidentPriorityElevated_UrgencyWithoutElevationPublishesNothing(t *testing.T) {
+	client := newTestIncidentElevationClient(t, 2, 2) // priority unchanged
+	publisher := &mockEventPublisher{}
+	svc := NewServiceNowIncidentService(client, publisher)
+
+	urgency := domain.IncidentUrgencyHigh
+	if _, err := svc.UpdateIncident(contextWithUserIDToken("token"), domain.UpdateIncidentRequest{
+		ID:      testIncidentUUID,
+		Urgency: &urgency,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, published := findPublishCall(publisher.calls, events.TypeIncidentPriorityElevated); published {
+		t.Error("an urgency change that did not raise the priority started a ladder")
+	}
+}
+
+// A PATCH touching none of state, priority, impact or urgency must not pay
+// for the baseline read at all.
+func TestUpdateIncident_UnrelatedPatchSkipsTheBaselineFetch(t *testing.T) {
+	var gets int
+	mux := http.NewServeMux()
+	mux.HandleFunc("/incidents/"+testIncidentSysid, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			gets++
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodPatch {
+			_, _ = w.Write([]byte(`{"message":"ok","incident":{"id":"` + testIncidentSysid + `","number":"INC0042"}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"id":"` + testIncidentSysid + `","number":"INC0042"}`))
+	})
+	svc := NewServiceNowIncidentService(newTestSNClient(t, mux), &mockEventPublisher{})
+
+	subject := "A clearer subject"
+	if _, err := svc.UpdateIncident(contextWithUserIDToken("token"), domain.UpdateIncidentRequest{
+		ID:      testIncidentUUID,
+		Subject: &subject,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if gets != 0 {
+		t.Errorf("a subject-only PATCH made %d baseline read(s); it should make none", gets)
 	}
 }

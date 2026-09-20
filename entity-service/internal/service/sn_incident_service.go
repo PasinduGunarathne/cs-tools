@@ -1437,12 +1437,19 @@ func (s *snIncidentService) UpdateIncident(ctx context.Context, req domain.Updat
 	}
 
 	// Baseline for the escalation signals below. Fetched only when this update
-	// could actually start or stop a call escalation — a PATCH that touches
-	// neither state nor priority pays no extra round trip. A failed fetch is
-	// not fatal: it leaves `before` zero-valued, which publishEscalationSignals
-	// treats as "no baseline, publish nothing" rather than guessing.
+	// could actually start or stop a call escalation, so every other PATCH
+	// pays no extra round trip. A failed fetch is not fatal: it leaves
+	// `before` zero-valued, which publishEscalationSignals treats as "no
+	// baseline, publish nothing" rather than guessing.
+	//
+	// Impact and urgency count as priority changes here, because in
+	// ServiceNow they ARE the priority: CreateIncident requires both and
+	// accepts no priority at all — the platform derives it. A PATCH raising
+	// urgency therefore raises the priority just as surely as one naming it,
+	// and gating on req.Priority alone meant that update published nothing
+	// and no ladder ever started.
 	var before domain.IncidentView
-	if s.publisher != nil && (req.State != nil || req.Priority != nil) {
+	if s.publisher != nil && incidentUpdateTouchesEscalation(req) {
 		if fetched, ferr := s.GetIncidentByID(ctx, req.ID); ferr == nil {
 			before = fetched
 		} else {
@@ -1496,11 +1503,30 @@ func (s *snIncidentService) publishEscalationSignals(
 			s.publishIncidentAcknowledged(ctx, req.ID, prev, next)
 		}
 	}
-	if req.Priority != nil {
+	if incidentUpdateTouchesPriority(req) {
 		if oldP, newP, ok := incidentPriorityElevation(before, after); ok {
 			s.publishIncidentPriorityElevated(ctx, req.ID, oldP, newP, after)
 		}
 	}
+}
+
+// incidentUpdateTouchesPriority reports whether an update could change the
+// incident's priority — directly, or through the impact and urgency
+// ServiceNow derives it from.
+//
+// The comparison itself is still made against the real before/after
+// priorities (see incidentPriorityElevation), so a change to impact or
+// urgency that leaves the derived priority alone publishes nothing. This only
+// decides whether it is worth looking.
+func incidentUpdateTouchesPriority(req domain.UpdateIncidentRequest) bool {
+	return req.Priority != nil || req.Impact != nil || req.Urgency != nil
+}
+
+// incidentUpdateTouchesEscalation reports whether an update could start or
+// stop a call escalation, and so whether the pre-PATCH baseline is worth
+// fetching.
+func incidentUpdateTouchesEscalation(req domain.UpdateIncidentRequest) bool {
+	return req.State != nil || incidentUpdateTouchesPriority(req)
 }
 
 // incidentStateTransition reports a genuine move out of NEW. Leaving NEW is

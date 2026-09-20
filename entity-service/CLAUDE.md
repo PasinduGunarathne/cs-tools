@@ -249,7 +249,9 @@ easy to wire up for real once both exist.
   worse than losing the ladder. `Account`/`ABTEligible` are declared on the
   payload but **never populated** here: incidents have no account field in
   this domain model, and this service has no product→BU mapping to derive
-  ABT eligibility from — see that service's own `CLAUDE.md` for what the
+  ABT eligibility from. `ABTEligible` is a `*bool` for exactly that reason —
+  an absent value must stay absent rather than decoding as an explicit
+  `false`, which would claim an answer nobody gave — see that service's own `CLAUDE.md` for what the
   missing flag does to the USA_WEEKEND routing rule. This
   service does not build or send an `IncidentLink` at all — this stays
   strictly a publisher of the fact that an incident was created, nothing
@@ -301,7 +303,11 @@ easy to wire up for real once both exist.
   `incident.acknowledged` when the incident genuinely **leaves NEW** (the
   specification's acknowledgement gesture for a newly reported incident), and
   `incident.priority_elevated` when its priority **strictly increases in
-  urgency** (the second trigger, keyed on the new priority). Both are guarded
+  urgency** (the second trigger, keyed on the new priority). A change to
+  `Impact` or `Urgency` counts as a priority change for both purposes:
+  ServiceNow derives priority from them — `CreateIncident` requires both and
+  accepts no priority at all — so a PATCH raising urgency raises the priority
+  just as surely as one naming it. Both are guarded
   against a no-op re-PATCH the same way `publishSeverityChanged` is, which
   needs the incident as it was *before* the PATCH — so `UpdateIncident`
   fetches a baseline first, but only when the request touches `State` or

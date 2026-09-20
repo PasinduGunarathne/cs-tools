@@ -185,7 +185,7 @@ func createdEvent(t *testing.T, priority string, at time.Time) eventbus.Record {
 		Account:          "Automation Test Account",
 		Team:             "Atlas",
 		Product:          "WSO2 API Manager",
-		ABTEligible:      true,
+		ABTEligible:      abtYes(),
 		ReportedAt:       at.Format(time.RFC3339),
 	})
 }
@@ -489,7 +489,7 @@ func TestEngine_PriorityElevationReplacesTheRunningLadder(t *testing.T) {
 		Title:       "Gateway returning 500s in production",
 		Number:      "INC0012345",
 		Team:        "Atlas",
-		ABTEligible: true,
+		ABTEligible: abtYes(),
 		ElevatedAt:  at.Add(time.Minute).Format(time.RFC3339),
 	})
 	if err := e.Handle(context.Background(), elevated); err != nil {

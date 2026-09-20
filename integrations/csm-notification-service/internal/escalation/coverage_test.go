@@ -78,7 +78,7 @@ func TestCoverage_EveryHourOfTheWeekGetsALadder(t *testing.T) {
 			}
 
 			// 3. The shift yields a real routing rule, not a fallthrough.
-			rc := RoutingContext{Product: "WSO2 API Manager", ABTEligible: true,
+			rc := RoutingContext{Product: "WSO2 API Manager", ABTEligible: abtYes(),
 				AssignedCRETeam: "Atlas", Shift: shift}
 			rule := rc.Rule()
 			if rule == "UNKNOWN" {
@@ -182,7 +182,7 @@ func TestCoverage_WindowsProduceTheLaddersTheyShould(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			rc := RoutingContext{Product: "WSO2 API Manager", ABTEligible: tc.abt,
+			rc := RoutingContext{Product: "WSO2 API Manager", ABTEligible: abtFor(tc.abt),
 				AssignedCRETeam: "Atlas", Shift: ShiftAt(tc.at)}
 			if got := rc.Rule(); got != tc.wantRule {
 				t.Errorf("rule = %s, want %s (shift %s)", got, tc.wantRule, rc.Shift)

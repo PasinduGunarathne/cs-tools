@@ -56,7 +56,18 @@ type RoutingContext struct {
 	Product string
 	// ABTEligible is whether the account qualifies for ABT-based support,
 	// determined by the assigned product.
-	ABTEligible bool
+	//
+	// A POINTER, because there are three states and not two. The rule table
+	// routes an ABT-eligible incident down one set of rows (R1-R4, R9, R10)
+	// and a sub-team one down another (R5, R6, R11, R12), so "we were not
+	// told" is a genuinely different situation from "told no" — and it is the
+	// common one today, since no publisher populates the field. A plain bool
+	// made every such incident indistinguishable from an explicit sub-team
+	// answer, silently routing all of them down the R5/R6/R11/R12 rows and
+	// giving a USA_WEEKEND incident a LEVEL_0 that rule R10 says it should
+	// not have. Nil says so instead; see Rule and HasNotificationLevel for
+	// what each does about it.
+	ABTEligible *bool
 	// AssignedCRETeam is the CS team on the incident; empty when unassigned,
 	// which rules R3 and R4 route on (and section 12.0 also flags).
 	AssignedCRETeam string
@@ -88,10 +99,38 @@ func (rc RoutingContext) HasNotificationLevel() bool {
 	if !rc.Shift.IsRotation() {
 		return false
 	}
-	if rc.Shift == ShiftUSAWeekend && rc.ABTEligible {
+	// USA_WEEKEND is the one rotation whose notification level depends on the
+	// business unit. With eligibility unknown, the level is included: the two
+	// errors are not symmetric. Including it wrongly wakes a rotation member
+	// who was not on the hook, and the ladder still reaches every later rung
+	// on time. Omitting it wrongly removes the first and fastest rung from an
+	// unattended incident on a weekend night — the very situation the
+	// notification level exists for. Paging one person too many is the
+	// recoverable direction.
+	if rc.Shift == ShiftUSAWeekend && rc.isABTEligible() {
 		return false
 	}
 	return true
+}
+
+// isABTEligible reports a definite yes. Unknown is not yes.
+func (rc RoutingContext) isABTEligible() bool {
+	return rc.ABTEligible != nil && *rc.ABTEligible
+}
+
+// abtKnown reports whether the publisher told us either way.
+func (rc RoutingContext) abtKnown() bool { return rc.ABTEligible != nil }
+
+// ABTEligibility renders the three states for a log line or a work note,
+// where "unknown" is the part worth seeing.
+func (rc RoutingContext) ABTEligibility() string {
+	if !rc.abtKnown() {
+		return "unknown"
+	}
+	if *rc.ABTEligible {
+		return "yes"
+	}
+	return "no"
 }
 
 // Rule identifies which row of section 5.0's rule table (R1–R14) this incident
@@ -140,7 +179,17 @@ func (rc RoutingContext) Rule() string {
 		return "UNKNOWN"
 	}
 
-	if rc.ABTEligible {
+	// Eligibility splits the table in half — the ABT rows from the sub-team
+	// ones — so without it the row genuinely cannot be named. Saying so is
+	// the point: this string is what a log line and the incident's own work
+	// note report as the path a call alert took, and a confident "R12" on an
+	// incident nobody classified is worse than an honest admission, because
+	// it reads as a decision that was made rather than one that was missed.
+	if !rc.abtKnown() {
+		return "UNKNOWN_ABT"
+	}
+
+	if *rc.ABTEligible {
 		switch {
 		case rc.Shift == ShiftUSA:
 			return "R9"

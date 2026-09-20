@@ -38,7 +38,7 @@ func testTrigger(priority string, shift Shift) Trigger {
 		Team:       "Americas CS Team - Integraion",
 		Kind:       TriggerNewIncident,
 		At:         triggerAt,
-		Routing:    RoutingContext{Product: "WSO2 API Manager", ABTEligible: true, AssignedCRETeam: "Atlas", Shift: shift},
+		Routing:    RoutingContext{Product: "WSO2 API Manager", ABTEligible: abtYes(), AssignedCRETeam: "Atlas", Shift: shift},
 	}
 }
 

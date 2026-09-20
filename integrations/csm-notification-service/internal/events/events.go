@@ -361,7 +361,13 @@ type IncidentCreatedPayload struct {
 	// Section 5.0 routes on it, and it is also what decides whether a
 	// USA_WEEKEND incident has a LEVEL_0 at all (see
 	// escalation.RoutingContext.HasNotificationLevel).
-	ABTEligible bool `json:"abtEligible,omitempty"`
+	//
+	// A POINTER so an absent field stays absent. It splits the rule table in
+	// half — ABT rows against sub-team ones — so "not told" is a different
+	// situation from "told no", and it is the common one: no publisher sets
+	// this today. Decoding an omission as false made every such incident
+	// indistinguishable from an explicit sub-team answer.
+	ABTEligible *bool `json:"abtEligible,omitempty"`
 	// ReportedAt is when the incident was actually reported, RFC3339. Every
 	// call in the ladder is an offset from this, never from consume time, so
 	// a backlogged consumer does not shift the whole ladder later than
@@ -492,7 +498,7 @@ type IncidentPriorityElevatedPayload struct {
 	Account     string `json:"account,omitempty"`
 	Team        string `json:"team,omitempty"`
 	Product     string `json:"product,omitempty"`
-	ABTEligible bool   `json:"abtEligible,omitempty"`
+	ABTEligible *bool  `json:"abtEligible,omitempty"`
 	// ElevatedAt is when the priority actually changed, RFC3339 — the instant
 	// this ladder's offsets are measured from.
 	ElevatedAt string `json:"elevatedAt,omitempty"`

@@ -200,7 +200,14 @@ func run() error {
 	// A hard cap, checked before a single call goes out, rather than a running
 	// total that can only notice an overshoot after the fact.
 	if len(st.Plan.Calls) > cfg.maxCalls {
-		_ = rdb.Del(ctx, "incident:escalation:state:"+cfg.incidentID).Err()
+		// Retire it properly rather than just dropping the state key:
+		// Handle has already seeded a wake entry per planned call, and those
+		// live in a sorted set shared with every other ladder. Deleting the
+		// state alone would strand them there, rescanned on every tick, with
+		// nothing able to reclaim them afterwards.
+		if err := retireLadder(ctx, escalation.NewStore(rdb), cfg.incidentID); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: could not retire the over-cap ladder %s: %v\n", cfg.incidentID, err)
+		}
 		return fmt.Errorf("this plan is %d calls, more than --max-calls=%d; raise the cap or pick a shorter priority",
 			len(st.Plan.Calls), cfg.maxCalls)
 	}
@@ -390,7 +397,7 @@ func startRecord(cfg config, at time.Time) eventbus.Record {
 			Account:     "Automation Test Account",
 			Team:        "Americas CS Team - Integraion",
 			Product:     "WSO2 API Manager",
-			ABTEligible: !cfg.notABT,
+			ABTEligible: abtFlag(cfg.notABT),
 			ElevatedAt:  at.Format(time.RFC3339),
 		})
 	}
@@ -402,7 +409,7 @@ func startRecord(cfg config, at time.Time) eventbus.Record {
 		Account:          "Automation Test Account",
 		Team:             "Americas CS Team - Integraion",
 		Product:          "WSO2 API Manager",
-		ABTEligible:      !cfg.notABT,
+		ABTEligible:      abtFlag(cfg.notABT),
 		ReportedAt:       at.Format(time.RFC3339),
 	})
 }
@@ -566,8 +573,8 @@ func printHeader(cfg config, plan escalation.Plan, trigger time.Time, to string)
 	fmt.Printf("  incident        %s\n", cfg.incidentID)
 	fmt.Printf("  priority        %s\n", cfg.priority)
 	fmt.Printf("  reported at     %s\n", trigger.Format("Mon 2006-01-02 15:04 MST"))
-	fmt.Printf("  shift           %s (derived by the engine; ABT-eligible: %t)\n",
-		plan.Trigger.Routing.Shift, plan.Trigger.Routing.ABTEligible)
+	fmt.Printf("  shift           %s (derived by the engine; ABT-eligible: %s)\n",
+		plan.Trigger.Routing.Shift, plan.Trigger.Routing.ABTEligibility())
 	fmt.Printf("  trigger         %s\n", plan.Trigger.Kind)
 	fmt.Printf("  message         %s\n", map[bool]string{true: "SSML", false: "plain"}[cfg.ssml])
 	fmt.Printf("  clock           1 ladder minute = %s\n", cfg.minute)
@@ -732,21 +739,38 @@ func listCalls(ctx context.Context, client *http.Client, base, acct, token, to s
 
 // retireLadder drops a ladder's outstanding calls and its state, so nothing
 // resumes it after this process exits.
+//
+// The wake entries are found by scanning the index rather than by reading
+// them out of the stored state, because the two can come apart: a ladder
+// abandoned between seeding its wakes and writing — or after losing — its
+// state would otherwise strand every one of those entries in a sorted set
+// shared with every other ladder, rescanned on every tick, with nothing able
+// to reclaim them. Scanning means this works from either half alone.
 func retireLadder(ctx context.Context, store *escalation.Store, incidentID string) error {
-	st, found, err := store.Get(ctx, incidentID)
-	if err != nil || !found {
-		return err
-	}
-	var pending []string
-	for i, done := range st.Placed {
-		if !done {
-			pending = append(pending, fmt.Sprintf("%s|%d", incidentID, i))
-		}
-	}
-	if err := store.RemoveWakes(ctx, pending...); err != nil {
+	if err := store.RemoveWakes(ctx, wakeMembersFor(ctx, store, incidentID)...); err != nil {
 		return err
 	}
 	return store.Delete(ctx, incidentID)
+}
+
+// wakeMembersFor lists every scheduled call belonging to one incident.
+//
+// "Due arbitrarily far in the future" is how the whole index is read: the
+// store exposes a due-by query, and a decade ahead covers every entry it
+// could hold.
+func wakeMembersFor(ctx context.Context, store *escalation.Store, incidentID string) []string {
+	members, err := store.DueMembers(ctx, time.Now().AddDate(10, 0, 0))
+	if err != nil {
+		return nil
+	}
+	prefix := incidentID + "|"
+	var mine []string
+	for _, m := range members {
+		if strings.HasPrefix(m, prefix) {
+			mine = append(mine, m)
+		}
+	}
+	return mine
 }
 
 // cleanupLocalLadders retires every ladder this tool has ever left behind —
@@ -841,4 +865,12 @@ func loadDotEnv(path string) {
 			_ = os.Setenv(k, v)
 		}
 	}
+}
+
+// abtFlag turns the --not-abt flag into the definite answer the payload now
+// carries. A harness always knows which side it is testing, so it never sends
+// the "unknown" a real publisher currently does.
+func abtFlag(notABT bool) *bool {
+	eligible := !notABT
+	return &eligible
 }

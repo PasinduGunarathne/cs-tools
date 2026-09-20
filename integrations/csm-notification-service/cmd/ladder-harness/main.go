@@ -14,20 +14,20 @@
 // specific language governing permissions and limitations
 // under the License.
 
-// Command ladder-harness runs one incident call-escalation ladder end to end
-// against a single phone number, on a compressed clock.
+// Command ladder-harness walks one incident call-escalation ladder against a
+// single phone number, on a compressed clock, placing the calls itself.
 //
-// It exists because the escalation ladder has no engine yet: nothing consumes
-// incident.created or incident.priority_elevated and turns a plan into calls
-// placed over time. Until that exists there is no way to hear what the
-// escalation actually does. This harness closes that gap for testing only —
-// it builds a real plan with internal/escalation and places the calls itself,
-// with one real ladder minute shrunk to a second or two.
+// It predates the engine and is no longer the tool to reach for. It builds a
+// real plan with internal/escalation and then dials it directly, so it
+// exercises the timing table and the spoken message but none of the engine:
+// no durable state, no idempotency under redelivery, no resumption after a
+// restart, and no cancellation driven by a real event — its --ack-after is a
+// flag, not an incoming signal. cmd/escalation-local drives the real engine
+// against a real Redis and real event envelopes, and is what a change to the
+// ladder should be tested with.
 //
-// It is NOT the engine and must not become one. It has no durable state, no
-// idempotency, no consumer, and it forgets everything if it is interrupted.
-// See the engine notes in the escalation package before reaching for this as
-// a starting point.
+// What this is still good for: seeing what a ladder looks like with nothing
+// running but Go. No Redis, no event bus, no engine — a plan and a clock.
 //
 // Safety: it never dials until --live is passed, --live refuses to run without
 // an explicit --to number (so it can never page whoever
@@ -168,7 +168,7 @@ func run(cfg config) error {
 		At:         time.Now(),
 		Routing: escalation.RoutingContext{
 			Product:         "WSO2 API Manager",
-			ABTEligible:     !cfg.notABT,
+			ABTEligible:     abtFlag(cfg.notABT),
 			AssignedCRETeam: "Atlas",
 			Shift:           shift,
 		},
@@ -307,8 +307,8 @@ func printPlan(cfg config, trigger escalation.Trigger, plan escalation.Plan) {
 	fmt.Printf("Incident call escalation ladder - %s\n", mode)
 	fmt.Printf("%s\n", strings.Repeat("=", 78))
 	fmt.Printf("  priority        %s\n", trigger.Priority)
-	fmt.Printf("  shift           %s (rotation: %t, ABT-eligible: %t, so LEVEL_0 %s)\n",
-		trigger.Routing.Shift, trigger.Routing.Shift.IsRotation(), trigger.Routing.ABTEligible,
+	fmt.Printf("  shift           %s (rotation: %t, ABT-eligible: %s, so LEVEL_0 %s)\n",
+		trigger.Routing.Shift, trigger.Routing.Shift.IsRotation(), trigger.Routing.ABTEligibility(),
 		map[bool]string{true: "runs", false: "is skipped"}[trigger.Routing.HasNotificationLevel()])
 	fmt.Printf("  trigger         %s\n", trigger.Kind)
 	fmt.Printf("  clock           1 ladder minute = %s\n", cfg.minute)
@@ -325,11 +325,14 @@ func printPlan(cfg config, trigger escalation.Trigger, plan escalation.Plan) {
 		fmt.Printf("    %-8s %-8s %s %s\n", "", is.Level, is.Reason, is.Detail)
 	}
 
-	label := "spoken message (plain)"
-	if cfg.useSSML {
-		label = "spoken message (SSML - pauses and a slowed case reference)"
-	}
-	fmt.Printf("\n  %s:\n    %s\n", label, trigger.VoiceMessagePlain())
+	// Always the plain rendering, and the label says so rather than
+	// announcing SSML and printing something else. The SSML document is a
+	// tree of elements, not a string, so printing it would mean showing
+	// markup — and the words are identical either way. What --ssml changes is
+	// how a real call sounds (pauses, a slowed case reference), which
+	// cmd/escalation-local --speak is the way to hear.
+	fmt.Printf("\n  spoken message (plain rendering; --ssml changes the delivery, not the words):\n    %s\n",
+		trigger.VoiceMessagePlain())
 	fmt.Printf("\n  running (ctrl-c to stop)...\n\n")
 }
 
@@ -424,4 +427,12 @@ func loadDotEnv(path string) {
 			_ = os.Setenv(key, value)
 		}
 	}
+}
+
+// abtFlag turns the --not-abt flag into the definite answer the payload now
+// carries. A harness always knows which side it is testing, so it never sends
+// the "unknown" a real publisher currently does.
+func abtFlag(notABT bool) *bool {
+	eligible := !notABT
+	return &eligible
 }
