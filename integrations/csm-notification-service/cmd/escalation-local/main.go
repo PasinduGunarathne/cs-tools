@@ -108,6 +108,8 @@ type config struct {
 	incidentID  string
 	showTwiML   bool
 	ringSeconds int
+	speak       bool
+	sayVoice    string
 	keep        bool
 	cleanup     bool
 }
@@ -158,11 +160,13 @@ func run() error {
 		return cleanupLocalLadders(ctx, escalation.NewStore(rdb), rdb)
 	}
 
-	twilio, recorder, closeTwilio, err := buildTwilioClient(cfg)
+	speaker := newSpeaker()
+	twilio, recorder, closeTwilio, err := buildTwilioClient(cfg, speaker)
 	if err != nil {
 		return err
 	}
 	defer closeTwilio()
+	defer speaker.wait()
 
 	engine := escalation.NewEngine(
 		escalation.DefaultPolicy,
@@ -236,6 +240,8 @@ func parseFlags() config {
 	flag.IntVar(&cfg.maxCalls, "max-calls", 20, "refuse to run a plan larger than this")
 	flag.StringVar(&cfg.redisAddr, "redis", envOr("REDIS_ADDR", "localhost:6379"), "Redis address holding the ladder state")
 	flag.StringVar(&cfg.incidentID, "incident-id", "", "incident id to use; defaults to a fresh one per run")
+	flag.BoolVar(&cfg.speak, "speak", false, "speak each call's message aloud through the local synthesiser instead of only printing it; needs no Twilio account")
+	flag.StringVar(&cfg.sayVoice, "say-voice", "Aman", "which local voice to speak with (macOS: `say -v '?'` lists them)")
 	flag.IntVar(&cfg.ringSeconds, "ring-seconds", 5, "how long each live call may ring before Twilio gives up; 0 uses Twilio's 60s default")
 	flag.BoolVar(&cfg.showTwiML, "show-twiml", false, "print the TwiML document of each call (dry runs only)")
 	flag.BoolVar(&cfg.keep, "keep", false, "leave this run's ladder in Redis on exit, so a later run resumes it (for testing resumption)")
@@ -269,7 +275,7 @@ func (r *callRecorder) snapshot() (int, string) {
 // local stub. The stub matters: it means a dry run still marshals the TwiML
 // through production code rather than skipping the call path entirely, which
 // is the only way to eyeball the SSML document before dialling anyone.
-func buildTwilioClient(cfg config) (*notifications.TwilioClient, *callRecorder, func(), error) {
+func buildTwilioClient(cfg config, speaker *speaker) (*notifications.TwilioClient, *callRecorder, func(), error) {
 	rec := &callRecorder{}
 	if cfg.live {
 		missing := []string{}
@@ -295,9 +301,16 @@ func buildTwilioClient(cfg config) (*notifications.TwilioClient, *callRecorder, 
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = r.ParseForm()
-		rec.record(r.PostFormValue("Twiml"))
+		twiml := r.PostFormValue("Twiml")
+		rec.record(twiml)
+		// Answer first, then speak: the engine is waiting on this response,
+		// and a fifteen-second message would otherwise look like a fifteen-
+		// second Twilio call.
 		w.WriteHeader(http.StatusCreated)
-		_, _ = w.Write([]byte(`{"sid":"CA-local"}`))
+		_, _ = w.Write([]byte(`{"sid":"CA-local-stub","status":"queued"}`))
+		if cfg.speak {
+			speaker.play(twiml, cfg.sayVoice)
+		}
 	}))
 	client := notifications.NewTwilioClient(notifications.TwilioConfig{
 		AccountSID: "AC-local", AuthToken: "local", FromNumber: "+15550000000",
@@ -558,6 +571,9 @@ func printHeader(cfg config, plan escalation.Plan, trigger time.Time, to string)
 	fmt.Printf("  trigger         %s\n", plan.Trigger.Kind)
 	fmt.Printf("  message         %s\n", map[bool]string{true: "SSML", false: "plain"}[cfg.ssml])
 	fmt.Printf("  clock           1 ladder minute = %s\n", cfg.minute)
+	if cfg.speak {
+		fmt.Printf("  audio           speaking each call aloud (voice %s) — this stretches the compressed clock\n", cfg.sayVoice)
+	}
 	if cfg.live && cfg.ringSeconds > 0 {
 		fmt.Printf("  ring            %ds, then Twilio gives up on the call\n", cfg.ringSeconds)
 	}
