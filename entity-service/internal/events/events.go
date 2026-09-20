@@ -30,6 +30,15 @@ import "encoding/json"
 type Type string
 
 const (
+	// CASE OR INCIDENT? Two different entities. A case is POST /cases and
+	// domain.CaseView; an incident is POST /incidents and
+	// domain.IncidentView. Their event families are separate for that
+	// reason, and a comment on one is not a comment on the other.
+	//
+	// "SRE incident" is not a third thing: sre-alert-ingestion-service turns
+	// a vendor alert into a platform incident through the same
+	// POST /incidents, so it produces exactly what the incident.* events
+	// describe.
 	TypeCaseCreated      Type = "case.created"
 	TypeCommentAdded     Type = "case.comment_added"
 	TypeStatusChanged    Type = "case.status_changed"

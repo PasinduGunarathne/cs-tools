@@ -23,6 +23,21 @@
 // Resolver seam in resolver.go) because it depends on organisation data that
 // does not exist in this platform yet.
 //
+// WHICH "INCIDENT" THIS IS. A platform incident: the entity behind
+// entity-service's POST /incidents, domain.IncidentView, and the incident.*
+// events. It has two producers and they create the same thing — a person
+// raising one through the CSM portal, and the SRE alert pipeline turning an
+// Azure, Grafana, Site24x7 or OpenSearch alert into one (see
+// integrations/sre-alert-ingestion-service, which posts to the same endpoint).
+// An alert-born incident is escalated by this ladder exactly like any other;
+// there is no separate "SRE incident" to distinguish.
+//
+// It is NOT a case. Cases are a different entity with their own endpoints
+// (POST /cases), their own domain type (domain.CaseView) and their own event
+// family (case.created, case.comment_added, case.acknowledged, and others) —
+// which is also why these events cannot simply be renamed to case.*: those
+// names are taken, by payloads that mean something else.
+//
 // Source: "Synchronizing Twilio Alerts for New Incoming Incidents Based on ABT
 // Model [USER REFERENCE]", sections 3.0 (levels), 6.0 (level/shift matrix) and
 // 7.0 (escalation timelines).

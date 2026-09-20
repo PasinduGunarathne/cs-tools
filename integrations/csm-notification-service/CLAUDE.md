@@ -116,6 +116,23 @@ The "Add Comment" CTA in all four templates changed from a solid-background butt
 - **`dispatch.go`'s `Handle` switch also has a no-op case for `events.TypeCaseBillableStatusChanged`**, mirroring the `TypeSLAClockRegister`/`TypeSLATierReached` case above exactly (a *different* consumer group — `internal/timecardengine`, not `internal/slaengine` — reacts to it instead): required for the same reason, since `dispatch.Dispatcher`'s own consumer group also gets a full copy of the topic and would otherwise treat this as an unknown type and dead-letter it once it starts being published.
 - **Accepted trade-off: `processDueMember` gates publishing `sla.tier_reached` on `EntityClient.SetTierReachedIfUnset`'s `alreadyReached`** (entity-service's `UPDATE ... WHERE ... IS NULL` decides atomically which caller actually caused the transition) — skip publishing, just drop the wake entry, when some earlier call already claimed the tier. This is a deliberate choice, not the obviously-safe option: `alreadyReached` only reflects the database claim, not whether a notification was ever actually delivered, so a caller whose own publish to Event Hub failed (or crashed) after winning the claim will, on later rediscovery, see `alreadyReached=true` and skip publishing — permanently losing that tier's notification, not just delaying it. Accepted anyway because a publish failure to Event Hub is judged rare, and duplicate-free rediscovery matters routinely, not just for a rare multi-replica race: it's what makes a planned (not yet built) Redis-outage fallback — falling back to asking entity-service directly which tiers are overdue when Redis itself is unreachable — usable at all, since Redis recovering after an outage rediscovers every wake entry that survived the outage, and without this gating every one of them would duplicate-publish on every recovery. If this trade-off ever stops being acceptable (Event Hub reliability turns out worse in practice, or this service starts running multiple replicas), the real fix is a durable delivery/outbox state tracked separately from the reached-claim, with a lease/expiry so a failed attempt's slot can still be retried by someone else — not built, see `Tick`'s own doc comment for the full reasoning.
 
+## Cases and incidents are different entities
+
+A **case** is entity-service's `POST /cases` and `domain.CaseView`, carried by
+the `case.*` events. An **incident** is `POST /incidents` and
+`domain.IncidentView`, carried by the `incident.*` events. Both families exist
+here and they are not interchangeable: `case.comment_added` and
+`incident.comment_added` are different payloads about different entities, and
+`dispatch` reacts to the first while `internal/escalation` reacts to the
+second.
+
+**"SRE incident" is not a third thing.** `integrations/sre-alert-ingestion-service`
+turns a vendor alert (Azure, Grafana, Site24x7, OpenSearch) into a platform
+incident through that same `POST /incidents`, so an alert-born incident is
+exactly what the `incident.*` events describe, and the call-escalation ladder
+below escalates it like any other. There is no separate SRE entity to tell it
+apart from.
+
 ## Incident call escalation
 
 `internal/escalation` runs the incident call-escalation ladder from the

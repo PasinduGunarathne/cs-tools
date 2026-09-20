@@ -117,6 +117,24 @@ Conventions to preserve when touching these:
   otherwise fill the logs. `Recovery` stays, since a panic there would take down the main API
   with it.
 
+## Cases and incidents are different entities
+
+A **case** is `POST /cases`, `domain.CaseView`, the `case.*` events. An
+**incident** is `POST /incidents`, `domain.IncidentView`, the `incident.*`
+events. Separate endpoints, separate domain types, separate handlers and
+separate service files (`sn_case_service.go` against `sn_incident_service.go`).
+A "comment added" on one is not a "comment added" on the other, which is why
+both `case.comment_added` and `incident.comment_added` exist and carry
+different payloads. Don't collapse the vocabulary: the two event families
+cannot be merged without two different payloads sharing one name.
+
+**"SRE incident" is not a third thing.** `integrations/sre-alert-ingestion-service`
+turns a vendor alert (Azure, Grafana, Site24x7, OpenSearch) into a platform
+incident by calling the same `POST /incidents` through csm-integration-service,
+so an alert-born incident is exactly the entity the `incident.*` events
+describe. csm-notification-service's call-escalation ladder escalates it like
+any other.
+
 ## Event Hub publishing
 
 `internal/eventbus` (a minimal Kafka producer for Azure Event Hub's

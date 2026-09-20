@@ -40,6 +40,21 @@ import "encoding/json"
 type Type string
 
 const (
+	// CASE OR INCIDENT? Two different entities, and the distinction matters
+	// before touching anything below.
+	//
+	// A case is entity-service's POST /cases, domain.CaseView, the case.*
+	// events here. An incident is POST /incidents, domain.IncidentView, the
+	// incident.* events. They have separate endpoints, separate domain types
+	// and separate handlers; a "comment added" on one is not a "comment
+	// added" on the other, which is why case.comment_added and
+	// incident.comment_added both exist and carry different payloads.
+	//
+	// "SRE incident" is not a third thing. integrations/sre-alert-ingestion-service
+	// turns a vendor alert (Azure, Grafana, Site24x7, OpenSearch) into a
+	// platform incident through the same POST /incidents, so it produces
+	// exactly the entity the incident.* events describe and the call-
+	// escalation ladder escalates.
 	TypeCaseCreated      Type = "case.created"
 	TypeCommentAdded     Type = "case.comment_added"
 	TypeStatusChanged    Type = "case.status_changed"
