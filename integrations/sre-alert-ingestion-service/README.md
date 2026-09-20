@@ -16,9 +16,21 @@ restarts and a regional failover, not just an in-process retry loop.
 
 ```bash
 # from integrations/sre-alert-ingestion-service
-psql "$SRE_ALERT_DATABASE_URL" -f migrations/0001_create_alert_buffer.up.sql
+PGHOST="${DB_HOST:-localhost}" PGPORT="${DB_PORT:-5432}" \
+PGUSER="$DB_USER" PGPASSWORD="$DB_PASSWORD" \
+PGDATABASE="$DB_NAME" PGSSLMODE="$DB_SSLMODE" \
+psql -f migrations/0001_create_alert_buffer.up.sql
 go run ./cmd/server/main.go
 ```
+
+(the server itself reads `DB_HOST`/`DB_PORT`/`DB_USER`/`DB_PASSWORD`/`DB_NAME`/
+`DB_SSLMODE` directly and builds its own DSN via `net/url` + `url.UserPassword`,
+which percent-encodes the password automatically — the one-liner above is
+only for driving `psql` by hand, and passes credentials as `PG*` environment
+settings rather than embedding them in a URI on purpose: libpq's own URI
+form requires percent-encoding any reserved character in the user-info part
+— `@` ends it early, `?` starts a query string — and shell quoting doesn't
+perform that encoding, it only protects the string from the shell itself)
 
 The server automatically loads `.env` from the working directory on startup
 (silently ignored if absent).
@@ -31,11 +43,18 @@ Server starts at `http://localhost:8080`.
 - Runtime: Go `1.26+`
 - Entry point: `cmd/server/main.go`
 - Authentication:
-  - Incoming requests (`POST /alerts`): **none at the app layer.** This
-    service is fronted by Choreo's API Manager gateway (subscription + M2M
-    app auth), matching `csm-integration-service`'s own convention — see
-    that service's `CLAUDE.md` for the full rationale, which applies
-    identically here.
+  - Incoming requests (`POST /alerts`): **HTTP Basic Auth, enforced by this
+    service itself.** Unlike this repo's other `integrations/*` services,
+    this one is deployed on AKS with no gateway/ingress auth layer in front
+    of it, so it authenticates every request end to end rather than
+    trusting a Choreo API Manager gateway. Each source (Datadog, Grafana,
+    PagerDuty, etc.) gets its own username/password pair, configured via
+    `SRE_ALERT_AUTH_USERS` as comma-separated `username:bcryptHash` entries
+    — passwords are never stored in plaintext, only their bcrypt hash. Use
+    `cmd/gen-basic-auth-hash` to generate the hash for a new password. This
+    variable is required; the service refuses to start without it, and
+    fails fast on any malformed entry. `GET /health` is deliberately
+    exempt, so liveness/readiness probes don't need credentials.
   - Outbound calls to `csm-integration-service`: OAuth2 client credentials
     grant (managed automatically), always M2M.
   - Outbound calls to Twilio: HTTP Basic Auth (Account SID / Auth Token) —
@@ -77,13 +96,19 @@ Copy `.env.example` to `.env` and fill in the values:
 
 | Variable | Description |
 |---|---|
-| `SRE_ALERT_DATABASE_URL` | Buffer database connection string (`postgres://...`) |
+| `DB_HOST` | Buffer database host (default `localhost`) |
+| `DB_PORT` | Buffer database port (default `5432`) |
+| `DB_USER` | Buffer database user. Required |
+| `DB_PASSWORD` | Buffer database password. Required — may contain any character, including `?`/`@`/`/`/spaces; the DSN is built in code via `url.UserPassword`, which percent-encodes it automatically |
+| `DB_NAME` | Buffer database name. Required |
+| `DB_SSLMODE` | Buffer database `sslmode`. No default — empty is a valid value (pgx applies its own default behavior); a managed Postgres (e.g. Azure Database for PostgreSQL) will typically need `require` |
 | `CSM_INTEGRATION_BASE_URL` | Base URL of `csm-integration-service` |
 | `CSM_INTEGRATION_TOKEN_URL` | OAuth2 token endpoint for `csm-integration-service` |
 | `CSM_INTEGRATION_CLIENT_ID` | OAuth2 client ID |
 | `CSM_INTEGRATION_CLIENT_SECRET` | OAuth2 client secret |
 | `CSM_INTEGRATION_SCOPES` | Comma-separated OAuth2 scopes |
 | `SRE_ALERT_CALLER_ID` | A real, provisioned platform user id — see "Known limitations" |
+| `SRE_ALERT_AUTH_USERS` | Required. Comma-separated `username:bcryptHash` pairs for inbound HTTP Basic Auth on `POST /alerts` — generate a hash with `cmd/gen-basic-auth-hash` |
 | `SRE_ALERT_MAX_RETRIES` | Retryable-failure count before escalation (default `3`) |
 | `SRE_ALERT_POLL_INTERVAL_SECONDS` | How often the worker scans the buffer (default `15`) |
 | `SRE_ALERT_GROUP_WINDOW_MINUTES` | How far back the incident-grouping search looks for an attachable incident (default `15`) |
@@ -117,7 +142,10 @@ Migrations follow this repo's `up`/`down` SQL-pair convention (matching
 `psql`, not from application code:
 
 ```bash
-psql "$SRE_ALERT_DATABASE_URL" -f migrations/0001_create_alert_buffer.up.sql
+PGHOST="${DB_HOST:-localhost}" PGPORT="${DB_PORT:-5432}" \
+PGUSER="$DB_USER" PGPASSWORD="$DB_PASSWORD" \
+PGDATABASE="$DB_NAME" PGSSLMODE="$DB_SSLMODE" \
+psql -f migrations/0001_create_alert_buffer.up.sql
 ```
 
 Driver: `github.com/jackc/pgx/v5` via `database/sql` (the `pgx/v5/stdlib`
@@ -167,11 +195,68 @@ to `SERVICE_INTERRUPTION` (`internal/severity.MapCategory`).
 
 - `GET /health` — liveness/readiness; reports `503` if the buffer database
   is unreachable
-- `POST /alerts` — accepts a normalized alert, persists it to the buffer,
-  responds `202` with `{"id": "<buffered-alert-id>"}`. Never attempts
-  delivery inline — see "Architecture" above.
+- `POST /alerts` — accepts a normalized alert (this service's own generic
+  `AlertRequest` shape), persists it to the buffer, responds `202` with
+  `{"id": "<buffered-alert-id>", "alertNumber": "<human-readable-number>"}`.
+  Never attempts delivery inline — see "Architecture" above. Stays available
+  for any source that can speak `AlertRequest`'s shape directly (e.g. a
+  future in-house tool); the four vendor-adapter routes below are additive
+  to it, not a replacement.
+- `POST /alerts/adapters/azure` — accepts an Azure Monitor
+  common-alert-schema webhook payload
+- `POST /alerts/adapters/site24x7` — accepts a Site24x7 native alert-webhook
+  payload; only `STATUS` `TROUBLE`/`DOWN`/`CRITICAL` creates a buffered
+  alert, any other `STATUS` returns `200` with a small acknowledgment body
+- `POST /alerts/adapters/opensearch` — accepts this source's own native
+  alert payload
+- `POST /alerts/adapters/grafana` — accepts a Grafana native alert-webhook
+  payload; only `state == "alerting"` creates a buffered alert, any other
+  state returns `200` with a small acknowledgment body
 
-See `openapi.yaml` for the full request/response schema.
+Every adapter route translates its vendor's own native payload into
+`AlertRequest`, then reuses the exact same validation/buffering/worker/
+grouping/dedup/escalation path `POST /alerts` uses — see
+`internal/handler.AlertHandler.enqueueAlert`. Each vendor gets its own
+dedicated route (deliberately, not one shared endpoint that branches on
+payload shape internally) so each vendor's parsing/mapping stays simple to
+reason about, route, and test independently. All five routes require the
+same HTTP Basic Auth as described above.
+
+See `openapi.yaml` for the full request/response schema of every route,
+including each adapter's own native payload shape.
+
+## Vendor-adapter mapping notes
+
+These are this service's own mapping choices for each adapter — the exact
+tables live in `internal/severity` and each `internal/handler/adapter_*.go`
+file; this section is a summary, not a restatement of every line.
+
+- **Azure** (`adapter_azure.go`): `Sev0`-`Sev4` → `critical`/`major`/`minor`/
+  `warning`/`ok`; a `monitorCondition` of `"Resolved"` always forces `"ok"`
+  regardless of the reported `Sev`. `service` defaults to `"Managed
+  Services"` when `monitoringService` is absent (matching the prior
+  ServiceNow-based pipeline's own fallback for the identical gap).
+  `alertId` becomes `uniqueIdentifier` for cross-alert grouping.
+- **Site24x7** (`adapter_site24x7.go`): only `STATUS` `TROUBLE`/`DOWN`/
+  `CRITICAL` (case-sensitive) create a buffered alert; anything else is
+  acknowledged with `200` and ignored. `DOWN`/`CRITICAL` → `critical`,
+  `TROUBLE` → `warning` — a real per-status severity mapping, deliberately
+  added here since the prior ServiceNow-based pipeline had none (every
+  alert through that path got the same hardcoded low-priority
+  classification regardless of `STATUS`).
+- **OpenSearch** (`adapter_opensearch.go`): `AlertRequest.source` is always
+  the fixed literal `"opensearch"` — this source's own `source` field is a
+  human-readable title, not the originating system's identity, and maps to
+  `metricName` instead. Any unrecognized/missing severity value maps to
+  `"ok"` (a deliberate, safe-default deviation from the prior pipeline,
+  which failed open to the *highest* severity on an unrecognized value).
+- **Grafana** (`adapter_grafana.go`): only `state == "alerting"` creates a
+  buffered alert; anything else is acknowledged with `200` and ignored,
+  matching the prior pipeline's own filter. `tags.severity` `"1"`-`"4"` →
+  `critical`/`major`/`minor`/`warning`; anything else/missing → `"ok"`.
+  `tags.service` is passed through as free text (unlike the prior pipeline,
+  which only honored it when it equaled `"CHOREO"` — a routing rule tied to
+  that system's own lookup table, with no equivalent here).
 
 ## Retry / escalation behavior
 
@@ -393,7 +478,7 @@ sre-alert-ingestion-service/
 │   ├── apierror/                 # Typed upstream error type (4xx/5xx passthrough)
 │   ├── backoff/                  # Pure exponential-backoff math (no I/O)
 │   ├── csmclient/                # OAuth2 client credentials HTTP client for csm-integration-service
-│   ├── handler/                  # POST /alerts, GET /health, alert-to-incident mapping
+│   ├── handler/                  # POST /alerts + vendor adapters, GET /health, alert-to-incident mapping
 │   ├── middleware/                # X-CSM-Correlation-ID, access log, security headers
 │   ├── notifications/            # Twilio voice-call escalation channel
 │   ├── severity/                 # Severity/source/category mapping tables
