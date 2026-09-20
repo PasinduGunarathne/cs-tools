@@ -126,7 +126,7 @@ func TestMakeSSMLCall(t *testing.T) {
 		APIBaseURL: srv.URL,
 	})
 	speech := Speech{Sentences: []Sentence{{Parts: []SpeechPart{Say("WSO2 Support Alert.")}}}}
-	if err := client.MakeSSMLCall(context.Background(), "+94770000001", speech); err != nil {
+	if _, err := client.MakeSSMLCall(context.Background(), "+94770000001", speech); err != nil {
 		t.Fatal(err)
 	}
 	if gotTo != "+94770000001" {
@@ -141,14 +141,14 @@ func TestMakeSSMLCall_Validation(t *testing.T) {
 	client := NewTwilioClient(TwilioConfig{AccountSID: "AC123", AuthToken: "secret", FromNumber: "+15550000000"})
 	speech := Speech{Sentences: []Sentence{{Parts: []SpeechPart{Say("Alert.")}}}}
 
-	if err := client.MakeSSMLCall(context.Background(), "  ", speech); err == nil {
+	if _, err := client.MakeSSMLCall(context.Background(), "  ", speech); err == nil {
 		t.Error("expected an error for an empty destination")
 	}
-	if err := client.MakeSSMLCall(context.Background(), "+94770000001", Speech{}); err == nil {
+	if _, err := client.MakeSSMLCall(context.Background(), "+94770000001", Speech{}); err == nil {
 		t.Error("expected an error for a silent call")
 	}
 	unconfigured := NewTwilioClient(TwilioConfig{})
-	if err := unconfigured.MakeSSMLCall(context.Background(), "+94770000001", speech); err == nil {
+	if _, err := unconfigured.MakeSSMLCall(context.Background(), "+94770000001", speech); err == nil {
 		t.Error("expected an error when Twilio is not configured")
 	}
 }

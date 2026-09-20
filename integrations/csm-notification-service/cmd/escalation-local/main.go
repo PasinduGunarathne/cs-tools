@@ -72,6 +72,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/signal"
 	"strings"
@@ -106,6 +107,7 @@ type config struct {
 	redisAddr   string
 	incidentID  string
 	showTwiML   bool
+	ringSeconds int
 	keep        bool
 	cleanup     bool
 }
@@ -212,8 +214,10 @@ func run() error {
 		}()
 	}
 
+	cfg.to = to
+	runStart := time.Now()
 	printHeader(cfg, st.Plan, trigger, to)
-	return runTicks(ctx, cfg, engine, rdb, trigger, recorder, st.Plan)
+	return runTicks(ctx, cfg, engine, rdb, trigger, recorder, st.Plan, runStart)
 }
 
 func parseFlags() config {
@@ -232,6 +236,7 @@ func parseFlags() config {
 	flag.IntVar(&cfg.maxCalls, "max-calls", 20, "refuse to run a plan larger than this")
 	flag.StringVar(&cfg.redisAddr, "redis", envOr("REDIS_ADDR", "localhost:6379"), "Redis address holding the ladder state")
 	flag.StringVar(&cfg.incidentID, "incident-id", "", "incident id to use; defaults to a fresh one per run")
+	flag.IntVar(&cfg.ringSeconds, "ring-seconds", 5, "how long each live call may ring before Twilio gives up; 0 uses Twilio's 60s default")
 	flag.BoolVar(&cfg.showTwiML, "show-twiml", false, "print the TwiML document of each call (dry runs only)")
 	flag.BoolVar(&cfg.keep, "keep", false, "leave this run's ladder in Redis on exit, so a later run resumes it (for testing resumption)")
 	flag.BoolVar(&cfg.cleanup, "cleanup", false, "retire every ladder this tool has left in Redis, then exit")
@@ -277,12 +282,13 @@ func buildTwilioClient(cfg config) (*notifications.TwilioClient, *callRecorder, 
 			return nil, nil, nil, fmt.Errorf("--live needs %s set in .env or the environment", strings.Join(missing, ", "))
 		}
 		client := notifications.NewTwilioClient(notifications.TwilioConfig{
-			AccountSID: os.Getenv("TWILIO_ACCOUNT_SID"),
-			AuthToken:  os.Getenv("TWILIO_AUTH_TOKEN"),
-			FromNumber: os.Getenv("TWILIO_FROM_NUMBER"),
-			Voice:      os.Getenv("TWILIO_VOICE"),
-			Language:   os.Getenv("TWILIO_LANGUAGE"),
-			APIBaseURL: os.Getenv("TWILIO_API_BASE_URL"),
+			AccountSID:         os.Getenv("TWILIO_ACCOUNT_SID"),
+			AuthToken:          os.Getenv("TWILIO_AUTH_TOKEN"),
+			FromNumber:         os.Getenv("TWILIO_FROM_NUMBER"),
+			Voice:              os.Getenv("TWILIO_VOICE"),
+			Language:           os.Getenv("TWILIO_LANGUAGE"),
+			APIBaseURL:         os.Getenv("TWILIO_API_BASE_URL"),
+			RingTimeoutSeconds: cfg.ringSeconds,
 		})
 		return client, rec, func() {}, nil
 	}
@@ -416,7 +422,7 @@ func envelope(entityID string, t events.Type, payload any) eventbus.Record {
 
 // runTicks drives the engine's own Tick on the compressed clock and fires the
 // acknowledgement part-way when asked.
-func runTicks(ctx context.Context, cfg config, engine *escalation.Engine, rdb *redis.Client, trigger time.Time, rec *callRecorder, plan escalation.Plan) error {
+func runTicks(ctx context.Context, cfg config, engine *escalation.Engine, rdb *redis.Client, trigger time.Time, rec *callRecorder, plan escalation.Plan, runStart time.Time) error {
 	fmt.Printf("\n  running (ctrl-c to stop)...\n\n")
 	store := escalation.NewStore(rdb)
 	ticker := time.NewTicker(cfg.tick)
@@ -438,7 +444,7 @@ func runTicks(ctx context.Context, cfg config, engine *escalation.Engine, rdb *r
 		select {
 		case <-ctx.Done():
 			fmt.Printf("\n  interrupted\n")
-			return summarise(context.Background(), cfg, store, rec, plan, cancelledAtLadderTime, lastPlaced, lastFailed)
+			return summarise(context.Background(), cfg, store, rec, plan, cancelledAtLadderTime, lastPlaced, lastFailed, runStart)
 		case <-ticker.C:
 			elapsed := time.Since(realStart)
 
@@ -472,7 +478,7 @@ func runTicks(ctx context.Context, cfg config, engine *escalation.Engine, rdb *r
 			}
 			if !found {
 				fmt.Printf("\n  the engine has finished with this incident and cleared its state\n")
-				return summarise(ctx, cfg, store, rec, plan, cancelledAtLadderTime, lastPlaced, lastFailed)
+				return summarise(ctx, cfg, store, rec, plan, cancelledAtLadderTime, lastPlaced, lastFailed, runStart)
 			}
 			lastPlaced = append(lastPlaced[:0], st.Placed...)
 			lastFailed = append(lastFailed[:0], st.Failed...)
@@ -491,7 +497,7 @@ func runTicks(ctx context.Context, cfg config, engine *escalation.Engine, rdb *r
 
 // summarise prints what the engine would have written back to the incident as
 // a work note, plus what the Twilio client actually sent.
-func summarise(ctx context.Context, cfg config, store *escalation.Store, rec *callRecorder, plan escalation.Plan, localCancelledAt *time.Time, observedPlaced []bool, observedFailed []string) error {
+func summarise(ctx context.Context, cfg config, store *escalation.Store, rec *callRecorder, plan escalation.Plan, localCancelledAt *time.Time, observedPlaced []bool, observedFailed []string, runStart time.Time) error {
 	count, twiml := rec.snapshot()
 
 	fmt.Printf("\n%s\n", strings.Repeat("-", 78))
@@ -527,6 +533,9 @@ func summarise(ctx context.Context, cfg config, store *escalation.Store, rec *ca
 
 	fmt.Printf("\n%d call(s) reached %s.\n", count,
 		map[bool]string{true: "Twilio", false: "the local stub"}[cfg.live])
+	if cfg.live {
+		reportCallOutcomes(ctx, cfg, runStart)
+	}
 	if twiml != "" && (cfg.showTwiML || !cfg.live) {
 		fmt.Printf("\nThe TwiML of the last call, as production code built it:\n%s\n", twiml)
 	}
@@ -549,6 +558,9 @@ func printHeader(cfg config, plan escalation.Plan, trigger time.Time, to string)
 	fmt.Printf("  trigger         %s\n", plan.Trigger.Kind)
 	fmt.Printf("  message         %s\n", map[bool]string{true: "SSML", false: "plain"}[cfg.ssml])
 	fmt.Printf("  clock           1 ladder minute = %s\n", cfg.minute)
+	if cfg.live && cfg.ringSeconds > 0 {
+		fmt.Printf("  ring            %ds, then Twilio gives up on the call\n", cfg.ringSeconds)
+	}
 	if cfg.cancelAfter > 0 {
 		fmt.Printf("  acknowledge at  %s into the run, by %s\n", cfg.cancelAfter, cfg.cancelBy)
 	}
@@ -579,6 +591,127 @@ func openRedis(cfg config) (*redis.Client, string, error) {
 		return redis.NewClient(opts), opts.Addr + " (from REDIS_URL)", nil
 	}
 	return redis.NewClient(&redis.Options{Addr: cfg.redisAddr, MaxRetries: -1}), cfg.redisAddr, nil
+}
+
+// reportCallOutcomes asks Twilio what became of the calls this run placed.
+//
+// Placing a call returns "queued" — that means Twilio accepted the request,
+// not that a phone rang. Only the call resource read back afterwards
+// distinguishes ringing from answered from no-answer from failed, and that is
+// the difference between "the alert was triggered" and "the alert was
+// delivered".
+//
+// It queries by destination and start time rather than by the sids the engine
+// placed: the engine holds the concrete Twilio client and logs its own sids,
+// so intercepting them here would mean wrapping a type this tool deliberately
+// does not own. Since every call in a run goes to the one --to number, "calls
+// to this number since the run began" is the same set.
+func reportCallOutcomes(ctx context.Context, cfg config, since time.Time) {
+	acct, token := os.Getenv("TWILIO_ACCOUNT_SID"), os.Getenv("TWILIO_AUTH_TOKEN")
+	if acct == "" || token == "" {
+		return
+	}
+	base := os.Getenv("TWILIO_API_BASE_URL")
+	if base == "" {
+		base = "https://api.twilio.com/2010-04-01"
+	}
+
+	fmt.Printf("\n%s\n", strings.Repeat("-", 78))
+	fmt.Printf("What Twilio says became of each call\n")
+	fmt.Printf("%s\n", strings.Repeat("-", 78))
+	fmt.Printf("  (waiting for the calls to reach a final state…)\n\n")
+
+	client := &http.Client{Timeout: 15 * time.Second}
+	calls := pollCalls(ctx, client, base, acct, token, cfg.to, since)
+	if len(calls) == 0 {
+		fmt.Printf("  Twilio reports no calls to this number since the run started.\n")
+		return
+	}
+	for _, c := range calls {
+		line := fmt.Sprintf("  %s  %-11s", c.SID, c.Status)
+		if c.Duration != "" && c.Duration != "0" {
+			line += "  " + c.Duration + "s of audio"
+		}
+		fmt.Println(line)
+	}
+	fmt.Printf("\n  completed / in-progress  the phone rang and was answered\n")
+	fmt.Printf("  ringing                  still dialling as this printed\n")
+	fmt.Printf("  no-answer / busy         it rang, nobody took it\n")
+	fmt.Printf("  failed / canceled        it never rang — check the status above\n")
+}
+
+// twilioCall is the part of a call resource this report reads.
+type twilioCall struct {
+	SID      string `json:"sid"`
+	Status   string `json:"status"`
+	Duration string `json:"duration"`
+}
+
+// pollCalls re-reads the run's calls until each has reached a final state, so
+// the reported outcome is what actually happened rather than whatever it
+// looked like a moment after dialling.
+func pollCalls(ctx context.Context, client *http.Client, base, acct, token, to string, since time.Time) []twilioCall {
+	const attempts = 15
+	var calls []twilioCall
+	for i := 0; i < attempts; i++ {
+		fetched, err := listCalls(ctx, client, base, acct, token, to, since)
+		if err != nil {
+			return calls
+		}
+		calls = fetched
+		settled := len(calls) > 0
+		for _, c := range calls {
+			switch c.Status {
+			case "completed", "busy", "no-answer", "failed", "canceled":
+			default:
+				settled = false
+			}
+		}
+		if settled {
+			return calls
+		}
+		select {
+		case <-ctx.Done():
+			return calls
+		case <-time.After(2 * time.Second):
+		}
+	}
+	return calls
+}
+
+// listCalls fetches this run's calls, newest first, reversed so the report
+// reads in the order the ladder placed them.
+func listCalls(ctx context.Context, client *http.Client, base, acct, token, to string, since time.Time) ([]twilioCall, error) {
+	q := url.Values{}
+	q.Set("To", to)
+	// Twilio's StartTime filter has minute granularity and is inclusive, so a
+	// minute of slack cannot miss a call placed in the same minute the run
+	// began.
+	q.Set("StartTime>", since.Add(-time.Minute).UTC().Format("2006-01-02T15:04:05Z"))
+	q.Set("PageSize", "50")
+	endpoint := fmt.Sprintf("%s/Accounts/%s/Calls.json?%s", base, url.PathEscape(acct), q.Encode())
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.SetBasicAuth(acct, token)
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	var body struct {
+		Calls []twilioCall `json:"calls"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return nil, err
+	}
+	for i, j := 0, len(body.Calls)-1; i < j; i, j = i+1, j-1 {
+		body.Calls[i], body.Calls[j] = body.Calls[j], body.Calls[i]
+	}
+	return body.Calls, nil
 }
 
 // retireLadder drops a ladder's outstanding calls and its state, so nothing

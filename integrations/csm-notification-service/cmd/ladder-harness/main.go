@@ -287,11 +287,13 @@ func buildCaller(cfg config) (caller, error) {
 	})
 	if cfg.useSSML {
 		return func(ctx context.Context, to string, t escalation.Trigger) error {
-			return client.MakeSSMLCall(ctx, to, t.VoiceSpeech())
+			_, err := client.MakeSSMLCall(ctx, to, t.VoiceSpeech())
+			return err
 		}, nil
 	}
 	return func(ctx context.Context, to string, t escalation.Trigger) error {
-		return client.MakeCall(ctx, to, t.VoiceMessagePlain())
+		_, err := client.MakeCall(ctx, to, t.VoiceMessagePlain())
+		return err
 	}, nil
 }
 

@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"regexp"
 	"time"
 
 	"github.com/wso2-open-operations/cs-tools/integrations/csm-notification-service/internal/apierror"
@@ -32,8 +33,8 @@ import (
 
 // callPlacer abstracts notifications.TwilioClient's two call methods.
 type callPlacer interface {
-	MakeSSMLCall(ctx context.Context, to string, speech notifications.Speech) error
-	MakeCall(ctx context.Context, to, message string) error
+	MakeSSMLCall(ctx context.Context, to string, speech notifications.Speech) (notifications.Call, error)
+	MakeCall(ctx context.Context, to, message string) (notifications.Call, error)
 }
 
 // ladderStore abstracts Store for testability.
@@ -447,6 +448,14 @@ func (e *Engine) processDue(ctx context.Context, member string) error {
 }
 
 // place dials one recipient, or logs the call when sending is disabled.
+//
+// Two lines, not one, and both matter when something goes wrong at 3am. The
+// first is written BEFORE the request, so a call that hangs or crashes the
+// process still leaves a record that this rung was about to page someone. The
+// second is written after the provider accepts it, and carries the call's sid
+// — the only durable handle on a call once this function returns, and what an
+// operator searches the console by to find out whether it actually rang, was
+// answered, or went to voicemail.
 func (e *Engine) place(ctx context.Context, t Trigger, call PlannedCall) error {
 	if !e.cfg.CallSendingEnabled {
 		slog.InfoContext(ctx, "escalation: call sending disabled (CALL_SENDING_ENABLED=false); not calling",
@@ -458,11 +467,33 @@ func (e *Engine) place(ctx context.Context, t Trigger, call PlannedCall) error {
 	slog.InfoContext(ctx, "escalation: placing call",
 		"incidentId", t.IncidentID, "rule", t.Routing.Rule(), "priority", t.Priority,
 		"level", call.Level.String(), "attempt", call.Ordinal,
-		"to", maskPhone(call.Recipient.Phone))
+		"to", maskPhone(call.Recipient.Phone), "message", messageKind(e.cfg.UseSSML))
+
+	var placed notifications.Call
+	var err error
 	if e.cfg.UseSSML {
-		return e.calls.MakeSSMLCall(ctx, call.Recipient.Phone, t.VoiceSpeech())
+		placed, err = e.calls.MakeSSMLCall(ctx, call.Recipient.Phone, t.VoiceSpeech())
+	} else {
+		placed, err = e.calls.MakeCall(ctx, call.Recipient.Phone, t.VoiceMessagePlain())
 	}
-	return e.calls.MakeCall(ctx, call.Recipient.Phone, t.VoiceMessagePlain())
+	if err != nil {
+		return err
+	}
+	slog.InfoContext(ctx, "escalation: ALERT TRIGGERED — the phone is ringing",
+		"incidentId", t.IncidentID, "rule", t.Routing.Rule(), "priority", t.Priority,
+		"level", call.Level.String(), "attempt", call.Ordinal,
+		"to", maskPhone(call.Recipient.Phone), "recipient", call.Recipient.Name,
+		"callSid", placed.SID, "callStatus", placed.Status)
+	return nil
+}
+
+// messageKind names which voice document a call carried, so a log line says
+// whether the SSML path or the plain one was exercised.
+func messageKind(ssml bool) string {
+	if ssml {
+		return "ssml"
+	}
+	return "plain"
 }
 
 // writeNote PATCHes the execution summary onto the incident (section 11.0).
@@ -522,20 +553,29 @@ func isPermanent(err error) bool {
 	return false
 }
 
+// twilioCodePattern finds the provider's own error code in a rejection body.
+//
+// Scanned for rather than JSON-decoded on purpose: the body is truncated to a
+// fixed budget before it reaches here (see the call client's maxErrBody), so a
+// long message — and Twilio's are long, they name the offending number and
+// link its documentation — leaves the JSON unparsable and took the code down
+// with it. A real rejection reported only as "REJECTED_400" sent this
+// investigation to the wrong error entirely: 21219 (destination unverified)
+// and 21210 (source number not on the account) are the same status and
+// completely different fixes.
+var twilioCodePattern = regexp.MustCompile(`"code"\s*:\s*(\d+)`)
+
 // permanentReason renders a rejection for the log line and the work note:
-// the provider's own status and, where it gives one, its error code — without
-// the body, which can echo the number back.
+// the provider's own status and, where it gives one, its error code — never
+// the message, which echoes the phone number back into places this service
+// keeps numbers out of.
 func permanentReason(err error) string {
 	var upstream *apierror.Error
 	if !errors.As(err, &upstream) {
 		return "REJECTED"
 	}
-	var payload struct {
-		Code    int    `json:"code"`
-		Message string `json:"message"`
-	}
-	if json.Unmarshal([]byte(upstream.Body), &payload) == nil && payload.Code != 0 {
-		return fmt.Sprintf("REJECTED_%d_%d", upstream.StatusCode, payload.Code)
+	if m := twilioCodePattern.FindStringSubmatch(upstream.Body); m != nil {
+		return fmt.Sprintf("REJECTED_%d_%s", upstream.StatusCode, m[1])
 	}
 	return fmt.Sprintf("REJECTED_%d", upstream.StatusCode)
 }

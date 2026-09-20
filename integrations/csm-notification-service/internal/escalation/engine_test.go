@@ -110,20 +110,20 @@ type fakeCaller struct {
 	err    error
 }
 
-func (f *fakeCaller) MakeSSMLCall(_ context.Context, to string, _ notifications.Speech) error {
+func (f *fakeCaller) MakeSSMLCall(_ context.Context, to string, _ notifications.Speech) (notifications.Call, error) {
 	if f.err != nil {
-		return f.err
+		return notifications.Call{}, f.err
 	}
 	f.placed = append(f.placed, placedCall{to: to, ssml: true})
-	return nil
+	return notifications.Call{SID: "CAtest", Status: "queued"}, nil
 }
 
-func (f *fakeCaller) MakeCall(_ context.Context, to, _ string) error {
+func (f *fakeCaller) MakeCall(_ context.Context, to, _ string) (notifications.Call, error) {
 	if f.err != nil {
-		return f.err
+		return notifications.Call{}, f.err
 	}
 	f.placed = append(f.placed, placedCall{to: to})
-	return nil
+	return notifications.Call{SID: "CAtest", Status: "queued"}, nil
 }
 
 type fakeNotes struct {

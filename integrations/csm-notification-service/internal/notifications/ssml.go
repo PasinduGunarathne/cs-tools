@@ -191,26 +191,27 @@ func ssmlTwiML(s Speech, voice, language string) (string, error) {
 // structured SSML document. Identical to MakeCall in every other respect —
 // same account, same FromNumber requirement, same Voice/Language config, same
 // Calls.json resource — differing only in what it puts inside <Say>.
-func (c *TwilioClient) MakeSSMLCall(ctx context.Context, to string, speech Speech) error {
+func (c *TwilioClient) MakeSSMLCall(ctx context.Context, to string, speech Speech) (Call, error) {
 	if strings.TrimSpace(to) == "" {
-		return fmt.Errorf("notifications: to is required")
+		return Call{}, fmt.Errorf("notifications: to is required")
 	}
 	if speech.IsEmpty() {
-		return fmt.Errorf("notifications: message is required")
+		return Call{}, fmt.Errorf("notifications: message is required")
 	}
 	if c.cfg.AccountSID == "" || c.cfg.AuthToken == "" || c.cfg.FromNumber == "" {
-		return fmt.Errorf("notifications: twilio is not configured")
+		return Call{}, fmt.Errorf("notifications: twilio is not configured")
 	}
 
 	twiml, err := ssmlTwiML(speech, c.cfg.Voice, c.cfg.Language)
 	if err != nil {
-		return err
+		return Call{}, err
 	}
 	form := url.Values{
 		"To":    {to},
 		"From":  {c.cfg.FromNumber},
 		"Twiml": {twiml},
 	}
+	c.applyRingTimeout(form)
 
 	return c.do(ctx, "Calls.json", form)
 }

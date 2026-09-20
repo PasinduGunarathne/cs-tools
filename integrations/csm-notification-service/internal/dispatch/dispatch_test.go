@@ -137,11 +137,11 @@ type mockCallSender struct {
 	calls []sentCall
 }
 
-func (m *mockCallSender) MakeCall(ctx context.Context, to, message string) error {
+func (m *mockCallSender) MakeCall(ctx context.Context, to, message string) (notifications.Call, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.calls = append(m.calls, sentCall{to, message})
-	return m.err
+	return notifications.Call{}, m.err
 }
 
 // mockLinkResolver defaults to resolving every recipient to the same fixed

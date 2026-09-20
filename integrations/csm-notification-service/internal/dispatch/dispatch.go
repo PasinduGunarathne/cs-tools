@@ -56,7 +56,7 @@ type googleChatSender interface {
 
 // callSender abstracts notifications.TwilioClient's MakeCall for testability.
 type callSender interface {
-	MakeCall(ctx context.Context, to, message string) error
+	MakeCall(ctx context.Context, to, message string) (notifications.Call, error)
 }
 
 // linkResolver abstracts recipientlinks.Resolver for testability.
@@ -1087,7 +1087,13 @@ func (d *Dispatcher) handleIncidentCreated(ctx context.Context, record eventbus.
 			slog.WarnContext(ctx, "dispatch: no callTo for incident.created (payload and INCIDENT_DEFAULT_CALL_TO both empty); skipping call")
 		default:
 			message := fmt.Sprintf("New incident: %s. %s", p.Title, p.ShortDescription)
-			callErr = d.call.MakeCall(ctx, callTo, message)
+			var placed notifications.Call
+			placed, callErr = d.call.MakeCall(ctx, callTo, message)
+			if callErr == nil {
+				slog.InfoContext(ctx, "dispatch: incident call placed",
+					"incidentId", entityID, "to", maskPhone(callTo),
+					"callSid", placed.SID, "callStatus", placed.Status)
+			}
 			if callErr != nil {
 				d.forget(callKey)
 				callOwned = false
