@@ -238,11 +238,22 @@ func (t Trigger) caseRef() string {
 
 // instruction is the closing line of the voice message, which differs by
 // trigger exactly as section 10.0's template does.
-func (t Trigger) instruction() string {
-	if t.Kind == TriggerNewIncident {
+//
+// quoted reproduces the specification's own punctuation — it writes the state
+// as 'Work In Progress' — and is right inside SSML, where the quotes sit in
+// markup a speech engine parses. The plain document is not parsed: it is
+// escaped into XML character data, so an apostrophe arrives as &#39; and a
+// text-to-speech voice may well pronounce it. The two messages therefore
+// differ by exactly these two characters, which is why this takes a flag
+// rather than the callers sharing one string.
+func (t Trigger) instruction(quoted bool) string {
+	if t.Kind != TriggerNewIncident {
+		return "Add a public comment to stop further notifications."
+	}
+	if quoted {
 		return "Update the ticket status to 'Work In Progress' to stop further notifications."
 	}
-	return "Add a public comment to stop further notifications."
+	return "Update the ticket status to Work In Progress to stop further notifications."
 }
 
 // VoiceSpeech renders section 10.0's alert as a structured SSML document, in
@@ -286,7 +297,7 @@ func (t Trigger) VoiceSpeech() notifications.Speech {
 		sentences = append(sentences, sentence(notifications.Say(fmt.Sprintf("Team - %s.", t.Team))))
 	}
 	sentences = append(sentences,
-		sentence(notifications.Stress("moderate", " "+t.instruction())),
+		sentence(notifications.Stress("moderate", " "+t.instruction(true))),
 		sentence(notifications.Pause("1s")),
 	)
 	return notifications.Speech{Sentences: sentences}
@@ -537,7 +548,7 @@ func (t Trigger) VoiceMessagePlain() string {
 	if t.Team != "" {
 		parts = append(parts, fmt.Sprintf("Team, %s.", t.Team))
 	}
-	return strings.Join(append(parts, t.instruction()), " ")
+	return strings.Join(append(parts, t.instruction(false)), " ")
 }
 
 // spacedRef separates a reference's characters so a text-to-speech voice reads
