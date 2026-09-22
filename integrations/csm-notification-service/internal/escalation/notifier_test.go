@@ -425,3 +425,47 @@ func rungsOf(alerts []notifications.EscalationAlert) []string {
 	}
 	return out
 }
+
+// A card has to carry the clock, because a space does not show one. These are
+// the two fields that turn a list of notices into a visible escalation: how
+// long this has gone unattended, and how long until it climbs again.
+func TestChatNotifier_CardCarriesTheClock(t *testing.T) {
+	chat := &fakeChat{}
+	e := chatEngine(t, chat, newMemStore(), &fakeNotes{})
+
+	at := ist(2026, 9, 9, 10, 0)
+	if err := e.Handle(context.Background(), createdEvent(t, "CRITICAL", at)); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.Tick(context.Background(), at.Add(2*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if len(chat.posted) != 4 {
+		t.Fatalf("posted %d cards, want 4", len(chat.posted))
+	}
+
+	// LEVEL_1 opens six minutes in and LEVEL_2 nine minutes after that.
+	first := chat.posted[0]
+	if first.Elapsed != "6m" {
+		t.Errorf("first card says unattended %q, want 6m", first.Elapsed)
+	}
+	if first.NextRung != "LEVEL_2" || first.NextIn != "9m" {
+		t.Errorf("first card points at %q in %q, want LEVEL_2 in 9m", first.NextRung, first.NextIn)
+	}
+
+	// Every rung of one incident belongs to one conversation.
+	for _, c := range chat.posted {
+		if c.ThreadKey != "incident-escalation-"+testIncidentID {
+			t.Errorf("card %s threaded under %q", c.Rung, c.ThreadKey)
+		}
+	}
+
+	// The last rung has nowhere to climb and must not claim otherwise.
+	last := chat.posted[len(chat.posted)-1]
+	if last.Rung != "LEVEL_4" {
+		t.Fatalf("last card is %s, want LEVEL_4", last.Rung)
+	}
+	if last.NextRung != "" || last.NextIn != "" {
+		t.Errorf("the final rung claims it escalates to %q in %q", last.NextRung, last.NextIn)
+	}
+}

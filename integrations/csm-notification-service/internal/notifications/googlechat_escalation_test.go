@@ -115,16 +115,68 @@ func TestEscalationCard_EscapesDynamicValues(t *testing.T) {
 	}
 }
 
-// Optional fields simply do not appear, rather than leaving a blank line or
-// the word "unattended" with nothing after it.
+// Optional fields simply do not appear, rather than leaving a dangling label.
 func TestEscalationCard_OmitsEmptyFields(t *testing.T) {
 	a := sampleAlert()
-	a.Elapsed, a.PortalURL, a.RecipientName, a.Rule = "", "", "", ""
+	a.PortalURL, a.RecipientName, a.Rule = "", "", ""
 	body := buildEscalationCard(a).CardsV2[0].Card.Sections[0].Widgets[0].TextParagraph.Text
-	for _, unwanted := range []string{"unattended", "Calling", "View incident", "path "} {
+	for _, unwanted := range []string{"Calling", "View incident", "path "} {
 		if strings.Contains(body, unwanted) {
 			t.Errorf("an absent field still rendered %q:\n%s", unwanted, body)
 		}
+	}
+}
+
+// How long an incident has gone unattended is the one thing a card must
+// always carry, because a space flattens time: cards minutes apart sit in a
+// list looking the same as cards seconds apart. A zero elapsed is named
+// rather than left as "unattended" with nothing after it.
+func TestEscalationCard_AlwaysSaysHowLongUnattended(t *testing.T) {
+	a := sampleAlert()
+	body := buildEscalationCard(a).CardsV2[0].Card.Sections[0].Widgets[0].TextParagraph.Text
+	if !strings.Contains(body, "unattended 18m") {
+		t.Errorf("the card does not say how long it has been unattended:\n%s", body)
+	}
+
+	a.Elapsed = ""
+	body = buildEscalationCard(a).CardsV2[0].Card.Sections[0].Widgets[0].TextParagraph.Text
+	if !strings.Contains(body, "just raised") {
+		t.Errorf("a zero elapsed should be named, not blank:\n%s", body)
+	}
+}
+
+// And where it goes next, which is what turns a card from a notice into a
+// deadline.
+func TestEscalationCard_SaysWhatHappensNext(t *testing.T) {
+	a := sampleAlert()
+	a.NextRung, a.NextIn = "LEVEL_3", "7m"
+	body := buildEscalationCard(a).CardsV2[0].Card.Sections[0].Widgets[0].TextParagraph.Text
+	if !strings.Contains(body, "Escalates to LEVEL_3") || !strings.Contains(body, "in 7m unless acknowledged") {
+		t.Errorf("the card does not say where this goes next:\n%s", body)
+	}
+
+	// The final rung has nowhere to climb, and says so rather than going
+	// quiet, which would read as the escalation having stopped.
+	a.NextRung, a.NextIn = "", ""
+	body = buildEscalationCard(a).CardsV2[0].Card.Sections[0].Widgets[0].TextParagraph.Text
+	if !strings.Contains(body, "final rung") {
+		t.Errorf("the last rung does not say it is the last:\n%s", body)
+	}
+}
+
+// Every rung of one incident belongs in one conversation, or a space scatters
+// an unfolding escalation through everything else being posted.
+func TestEscalationCard_ThreadsByIncident(t *testing.T) {
+	a := sampleAlert()
+	a.ThreadKey = "incident-escalation-abc"
+	msg := buildEscalationCard(a)
+	if msg.Thread == nil || msg.Thread.ThreadKey != "incident-escalation-abc" {
+		t.Errorf("thread = %+v, want the incident's own key", msg.Thread)
+	}
+
+	a.ThreadKey = ""
+	if buildEscalationCard(a).Thread != nil {
+		t.Error("a card with no key must post standalone rather than into an empty thread")
 	}
 }
 

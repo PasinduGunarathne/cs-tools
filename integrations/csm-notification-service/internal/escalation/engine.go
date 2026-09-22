@@ -438,7 +438,7 @@ func (e *Engine) processDue(ctx context.Context, member string) error {
 	}
 
 	call := st.Plan.Calls[index]
-	if err := e.place(ctx, st.Plan.Trigger, call); err != nil {
+	if err := e.place(ctx, st.Plan, call); err != nil {
 		if !isPermanent(err) {
 			// Transient — leave the wake entry, the next tick retries.
 			return fmt.Errorf("escalation: place %s call for %s: %w", call.Level, incidentID, err)
@@ -491,7 +491,8 @@ func (e *Engine) processDue(ctx context.Context, member string) error {
 // Every channel is attempted even if an earlier one fails, and the errors are
 // joined: a chat webhook being down must not stop the phone ringing, and a
 // phone failing must not cost the room its sight of the escalation.
-func (e *Engine) place(ctx context.Context, t Trigger, call PlannedCall) error {
+func (e *Engine) place(ctx context.Context, plan Plan, call PlannedCall) error {
+	t := plan.Trigger
 	if !e.cfg.CallSendingEnabled {
 		slog.InfoContext(ctx, "escalation: sending disabled (CALL_SENDING_ENABLED=false); not notifying",
 			"incidentId", t.IncidentID, "rule", t.Routing.Rule(), "priority", t.Priority,
@@ -516,7 +517,7 @@ func (e *Engine) place(ctx context.Context, t Trigger, call PlannedCall) error {
 
 	var errs []error
 	for _, n := range e.notifiers {
-		delivered, err := n.Deliver(ctx, t, call)
+		delivered, err := n.Deliver(ctx, plan, call)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", n.Channel(), err))
 			continue

@@ -72,7 +72,24 @@ type EscalationAlert struct {
 	// PortalURL opens the incident.
 	PortalURL string
 	// Elapsed is how long the incident has been unattended, e.g. "18m".
+	// Empty means the ladder has only just started.
 	Elapsed string
+	// NextRung and NextIn say where this goes if nobody picks it up, e.g.
+	// "LEVEL_3" and "7m". Both empty on the final rung, which has nowhere
+	// left to climb.
+	//
+	// These exist because a space flattens time. Cards arrive minutes apart
+	// but sit in a list, and a reader scanning it cannot see from the cards
+	// alone whether an incident is escalating quickly or has been quietly
+	// stuck; the timestamps are there but easy to miss and hard to compare.
+	// Saying how long it has gone unattended and when it climbs next puts the
+	// urgency in the card rather than leaving it to be inferred.
+	NextRung string
+	NextIn   string
+	// ThreadKey groups every rung of one incident's ladder into a single
+	// conversation, so the space shows an escalation unfolding in one place
+	// instead of scattering it through everything else being posted.
+	ThreadKey string
 }
 
 // SendEscalationAlert posts one rung of the ladder to the product's space.
@@ -108,12 +125,17 @@ func buildEscalationCard(a EscalationAlert) chatCardMessage {
 	}
 	body.WriteString("<br>")
 	body.WriteString(caseAlertLine(`<font color="#5F6368">Priority %s</font>`, a.Priority))
-	if a.Elapsed != "" {
-		body.WriteString(caseAlertLine(`<font color="#5F6368"> - unattended %s</font>`, a.Elapsed))
-	}
+	body.WriteString(caseAlertLine(`<font color="#5F6368"> - unattended %s</font>`, elapsedOrNew(a.Elapsed)))
 	if a.Rule != "" {
+		body.WriteString(caseAlertLine(`<font color="#5F6368"> - path %s</font>`, a.Rule))
+	}
+	if a.NextRung != "" && a.NextIn != "" {
 		body.WriteString("<br>")
-		body.WriteString(caseAlertLine(`<font color="#5F6368">path %s</font>`, a.Rule))
+		body.WriteString(caseAlertLine(`<font color="#B3261E">Escalates to %s`, a.NextRung))
+		body.WriteString(caseAlertLine(` in %s unless acknowledged</font>`, a.NextIn))
+	} else if a.NextRung == "" {
+		body.WriteString("<br>")
+		body.WriteString(`<font color="#B3261E">This is the final rung. Nothing escalates past it.</font>`)
 	}
 	if a.Instruction != "" {
 		body.WriteString("<br><br>")
@@ -125,6 +147,7 @@ func buildEscalationCard(a EscalationAlert) chatCardMessage {
 	}
 
 	msg := chatCardMessage{
+		Thread: threadFor(a.ThreadKey),
 		CardsV2: []chatCardWrapper{{
 			CardID: "incident-escalation",
 			Card: chatCard{
@@ -138,6 +161,24 @@ func buildEscalationCard(a EscalationAlert) chatCardMessage {
 		}},
 	}
 	return msg
+}
+
+// elapsedOrNew renders how long an incident has gone unattended, naming the
+// zero case rather than leaving a card that says "unattended" and stops.
+func elapsedOrNew(elapsed string) string {
+	if elapsed == "" {
+		return "just raised"
+	}
+	return elapsed
+}
+
+// threadFor groups a ladder's rungs, or leaves the message standalone when no
+// key is given.
+func threadFor(key string) *chatThread {
+	if key == "" {
+		return nil
+	}
+	return &chatThread{ThreadKey: key}
 }
 
 // rungVerb keeps the header honest about what LEVEL_0 is.

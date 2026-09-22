@@ -114,6 +114,26 @@ func NewGoogleChatClient(cfg GoogleChatConfig) *GoogleChatClient {
 	}
 }
 
+// withThreadReplyOption adds the reply option a threaded webhook message
+// needs: post into the thread named by threadKey, and start it when it does
+// not exist yet. The alternative option would drop a message whose thread has
+// not been created, which is every ladder's first rung.
+//
+// The URL already carries its own key and token, so this preserves the whole
+// query rather than rebuilding it, and never logs the result.
+func withThreadReplyOption(webhookURL string) (string, error) {
+	u, err := url.Parse(webhookURL)
+	if err != nil {
+		// Deliberately not wrapping err: a parse failure echoes the URL,
+		// which carries the space's credentials.
+		return "", fmt.Errorf("notifications: google chat webhook URL is not parseable")
+	}
+	q := u.Query()
+	q.Set("messageReplyOption", "REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD")
+	u.RawQuery = q.Encode()
+	return u.String(), nil
+}
+
 // normalizeProduct makes product matching case- and whitespace-insensitive.
 func normalizeProduct(product string) string {
 	return strings.ToLower(strings.TrimSpace(product))
@@ -134,6 +154,17 @@ func redactURLError(err error) error {
 // single card message: https://developers.google.com/chat/api/guides/message-formats/cards
 type chatCardMessage struct {
 	CardsV2 []chatCardWrapper `json:"cardsV2"`
+	// Thread groups related messages under one conversation in the space.
+	// Omitted by every card that stands alone; set by the escalation ladder,
+	// whose rungs are one unfolding story rather than separate events.
+	Thread *chatThread `json:"thread,omitempty"`
+}
+
+// chatThread names the conversation a message belongs to. threadKey is any
+// stable string the sender chooses, so an incident id groups every rung of its
+// ladder without the sender having to learn the thread's real name first.
+type chatThread struct {
+	ThreadKey string `json:"threadKey"`
 }
 
 type chatCardWrapper struct {
@@ -486,6 +517,16 @@ func (c *GoogleChatClient) sendCard(ctx context.Context, product string, msg cha
 	body, err := json.Marshal(msg)
 	if err != nil {
 		return fmt.Errorf("notifications: encode google chat message: %w", err)
+	}
+
+	// A threaded message needs the space told what to do when the thread does
+	// not exist yet, which is the case for a ladder's first rung. Without
+	// this, Chat rejects the threadKey rather than starting the thread.
+	if msg.Thread != nil {
+		webhookURL, err = withThreadReplyOption(webhookURL)
+		if err != nil {
+			return err
+		}
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, webhookURL, bytes.NewReader(body))

@@ -182,6 +182,36 @@ func orNone(v string) string {
 	return v
 }
 
+// NextRungAfter says which rung follows the given call, and how long after it
+// opens, or two empty strings when nothing follows.
+//
+// It answers the question a card in a chat space cannot otherwise answer. A
+// phone call is a moment: it rings, and the urgency is self-evident. A card
+// sits in a list where minutes between posts look the same as seconds, so a
+// reader cannot tell a fast escalation from a stalled one. Naming the next
+// rung and its distance puts the clock in the message.
+func (p Plan) NextRungAfter(call PlannedCall) (rung, in string) {
+	for _, c := range p.Calls {
+		if c.Level <= call.Level {
+			continue
+		}
+		return c.Level.String(), shortDuration(c.At.Sub(call.At))
+	}
+	return "", ""
+}
+
+// shortDuration renders a gap the way someone glancing at a card reads it.
+func shortDuration(d time.Duration) string {
+	d = d.Round(time.Minute)
+	if d < time.Minute {
+		return "under a minute"
+	}
+	if d < time.Hour {
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	}
+	return fmt.Sprintf("%dh%02dm", int(d.Hours()), int(d.Minutes())%60)
+}
+
 // LevelsClimbed lists the rungs this plan will actually reach, in order. It is
 // the shape of the ladder for this particular incident, which differs by rule:
 // a level with no reachable recipient is absent entirely, and LEVEL_0 exists

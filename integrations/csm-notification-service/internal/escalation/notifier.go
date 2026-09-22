@@ -93,7 +93,11 @@ type Delivery struct {
 
 // notifier delivers one attempt of one rung.
 type notifier interface {
-	Deliver(ctx context.Context, t Trigger, call PlannedCall) (Delivery, error)
+	// Deliver notifies one recipient. plan is the whole ladder, not just this
+	// call, because a channel may need to say where the escalation goes next:
+	// a phone call is a moment and needs no such context, while a card sits
+	// in a room where the reader cannot see the clock running.
+	Deliver(ctx context.Context, plan Plan, call PlannedCall) (Delivery, error)
 	Channel() Channel
 }
 
@@ -105,7 +109,8 @@ type voiceNotifier struct {
 
 func (v voiceNotifier) Channel() Channel { return ChannelCall }
 
-func (v voiceNotifier) Deliver(ctx context.Context, t Trigger, call PlannedCall) (Delivery, error) {
+func (v voiceNotifier) Deliver(ctx context.Context, plan Plan, call PlannedCall) (Delivery, error) {
+	t := plan.Trigger
 	var placed notifications.Call
 	var err error
 	if v.useSSML {
@@ -149,11 +154,13 @@ type chatNotifier struct {
 
 func (chatNotifier) Channel() Channel { return ChannelChat }
 
-func (n chatNotifier) Deliver(ctx context.Context, t Trigger, call PlannedCall) (Delivery, error) {
+func (n chatNotifier) Deliver(ctx context.Context, plan Plan, call PlannedCall) (Delivery, error) {
 	if call.Ordinal > 1 {
 		return Delivery{Channel: ChannelChat, Status: "already posted for this rung"}, nil
 	}
 
+	t := plan.Trigger
+	nextRung, nextIn := plan.NextRungAfter(call)
 	product := t.Routing.Product
 	if product == "" {
 		product = n.defaultProduct
@@ -176,6 +183,14 @@ func (n chatNotifier) Deliver(ctx context.Context, t Trigger, call PlannedCall) 
 		Rule:          t.Routing.Rule(),
 		PortalURL:     portal,
 		Elapsed:       elapsedSince(t.At, call.At),
+		NextRung:      nextRung,
+		NextIn:        nextIn,
+		// One thread per incident, so a space shows an escalation unfolding
+		// in one conversation instead of scattering its rungs through
+		// everything else being posted. The incident id is the natural key:
+		// stable, unique, and already the identity every other part of the
+		// ladder is filed under.
+		ThreadKey: "incident-escalation-" + t.IncidentID,
 	}
 	if err := n.chat.SendEscalationAlert(ctx, alert); err != nil {
 		return Delivery{Channel: ChannelChat}, err
