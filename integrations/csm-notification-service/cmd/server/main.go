@@ -417,24 +417,28 @@ func main() {
 		// ladder that can never call anyone is worse than an absent one,
 		// because it looks like coverage.
 		roster, err := escalation.ParseRoster(os.Getenv("INCIDENT_ESCALATION_ROSTER"))
-		if err != nil {
+		escalationChannel, channelErr := escalation.ParseChannel(os.Getenv("INCIDENT_ESCALATION_CHANNEL"))
+		switch {
+		case err != nil:
 			// Not logging err itself: a malformed roster's decode error can
 			// quote the surrounding JSON, which carries real phone numbers.
 			slog.Error("invalid INCIDENT_ESCALATION_ROSTER: failed to parse; incident call escalation is disabled")
-		} else if roster.IsEmpty() {
+		case channelErr != nil:
+			slog.Error("invalid INCIDENT_ESCALATION_CHANNEL; incident call escalation is disabled", "err", channelErr)
+		case roster.IsEmpty():
 			slog.Warn("INCIDENT_ESCALATION_ROSTER is not set; incident call escalation is disabled")
-		} else {
+		default:
 			// Same entity-service and same shared OAuth2 app as the SLA
 			// engine's client above — a separate client only because this one
 			// speaks to /incidents rather than the sla_clocks endpoints.
 			//
 			// Unlike that one, this is os.Getenv and genuinely optional. The
 			// SLA engine can do nothing at all without entity-service — its
-			// clocks live there. This engine's job is placing calls; the
-			// execution summary is a record of what it did. A deployment
-			// (or a laptop) without entity-service access should still be
-			// able to run a real ladder, with the summary logged instead of
-			// written back — see Engine.writeNote's nil handling.
+			// clocks live there. This engine's job is notifying people; the
+			// execution summary is a record of what it did. A deployment (or
+			// a laptop) without entity-service access should still be able to
+			// run a real ladder, with the summary logged instead of written
+			// back — see Engine.writeNote's nil handling.
 			var escalationNotes *escalation.EntityClient
 			if base := os.Getenv("CUSTOMER_ENTITY_BASE_URL"); base != "" {
 				escalationNotes = escalation.NewEntityClient(escalation.EntityConfig{
@@ -453,19 +457,26 @@ func main() {
 				escalation.DefaultPolicy,
 				escalation.NewRosterResolver(roster),
 				twilioClient,
+				googleChatClient,
+				linkResolver,
 				escalation.NewStore(redisClient),
 				escalationNotes,
+				defaultChatProduct,
 				escalation.EngineConfig{
 					// Shares CALL_SENDING_ENABLED with
 					// dispatch.handleIncidentCreated's single call: both are
-					// the same outbound voice channel to the same people, and
+					// the same outbound channel to the same people, and
 					// splitting them would let a deployment silence one and
 					// not the other.
 					CallSendingEnabled: callSendingEnabled,
 					// SSML is opt-in rather than the default: it changes how
 					// every escalation call sounds, so a deployment should
-					// hear it (ladder-harness --ssml) before switching.
+					// hear it (escalation-local --speak) before switching.
 					UseSSML: os.Getenv("INCIDENT_ESCALATION_SSML") == "true",
+					// call, chat or both. Defaults to call — see
+					// ParseChannel for why silently downgrading a pager to a
+					// chat message would be the wrong default.
+					Channel: escalationChannel,
 				},
 			)
 
@@ -478,6 +489,11 @@ func main() {
 			// a coarse tick would visibly smear a P0 ladder.
 			escalationTick := envDuration("INCIDENT_ESCALATION_TICK_INTERVAL", 5*time.Second)
 			go escalationEngine.RunTicker(ctx, escalationTick)
+
+			slog.Info("incident call escalation is enabled",
+				"channel", string(escalationChannel),
+				"ssml", os.Getenv("INCIDENT_ESCALATION_SSML") == "true",
+				"sending", callSendingEnabled)
 
 			// dispatch.handleIncidentCreated's own single, immediate call to
 			// INCIDENT_DEFAULT_CALL_TO predates the ladder and is NOT part of

@@ -244,6 +244,10 @@ Dry runs are not stubbed at the client boundary: the real
 `APIBaseURL` override, so the TwiML — the SSML document especially — is built
 by production code and printed exactly as Twilio would receive it.
 
+You can also run the ladder over Google Chat instead of Twilio, which needs no
+telephony account at all - `-channel chat` posts one card per rung to the space
+`GOOGLE_CHAT_SPACES` configures, and `-channel both` does each.
+
 ```bash
 docker run --rm -p 6379:6379 redis          # the ladder's durable state
 

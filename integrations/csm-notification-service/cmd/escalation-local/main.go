@@ -109,6 +109,8 @@ type config struct {
 	showTwiML   bool
 	ringSeconds int
 	speak       bool
+	channel     string
+	chatProduct string
 	sayVoice    string
 	keep        bool
 	cleanup     bool
@@ -168,13 +170,20 @@ func run() error {
 	defer closeTwilio()
 	defer speaker.wait()
 
+	channel, err := escalation.ParseChannel(cfg.channel)
+	if err != nil {
+		return err
+	}
 	engine := escalation.NewEngine(
 		escalation.DefaultPolicy,
 		escalation.NewRosterResolver(localRoster(to)),
 		twilio,
+		localChatClient(cfg),
+		nil, // no link resolver locally; cards carry no portal URL
 		escalation.NewStore(rdb),
 		nil, // no entity-service locally; the summary is printed here instead
-		escalation.EngineConfig{CallSendingEnabled: true, UseSSML: cfg.ssml},
+		cfg.chatProduct,
+		escalation.EngineConfig{CallSendingEnabled: true, UseSSML: cfg.ssml, Channel: channel},
 	)
 
 	// The trigger instant decides the effective shift (the engine derives it
@@ -247,6 +256,8 @@ func parseFlags() config {
 	flag.IntVar(&cfg.maxCalls, "max-calls", 20, "refuse to run a plan larger than this")
 	flag.StringVar(&cfg.redisAddr, "redis", envOr("REDIS_ADDR", "localhost:6379"), "Redis address holding the ladder state")
 	flag.StringVar(&cfg.incidentID, "incident-id", "", "incident id to use; defaults to a fresh one per run")
+	flag.StringVar(&cfg.channel, "channel", "call", "how a rung reaches people: call, chat, or both")
+	flag.StringVar(&cfg.chatProduct, "chat-product", "", "which GOOGLE_CHAT_SPACES product routes the card; empty uses the default space")
 	flag.BoolVar(&cfg.speak, "speak", false, "speak each call's message aloud through the local synthesiser instead of only printing it; needs no Twilio account")
 	flag.StringVar(&cfg.sayVoice, "say-voice", "Aman", "which local voice to speak with (macOS: `say -v '?'` lists them)")
 	flag.IntVar(&cfg.ringSeconds, "ring-seconds", 5, "how long each live call may ring before Twilio gives up; 0 uses Twilio's 60s default")
@@ -325,6 +336,22 @@ func buildTwilioClient(cfg config, speaker *speaker) (*notifications.TwilioClien
 		APIBaseURL: srv.URL,
 	})
 	return client, rec, srv.Close, nil
+}
+
+// localChatClient builds the real Google Chat client from GOOGLE_CHAT_SPACES,
+// so --channel chat posts to a genuine space. Nil when nothing is configured,
+// which the engine reports rather than failing silently.
+func localChatClient(cfg config) *notifications.GoogleChatClient {
+	raw := os.Getenv("GOOGLE_CHAT_SPACES")
+	if raw == "" {
+		return nil
+	}
+	var spaces []notifications.GoogleChatSpace
+	if err := json.Unmarshal([]byte(raw), &spaces); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: GOOGLE_CHAT_SPACES does not parse; --channel chat will have no notifier\n")
+		return nil
+	}
+	return notifications.NewGoogleChatClient(notifications.GoogleChatConfig{Spaces: spaces})
 }
 
 // localRoster points every level at the one number under test, with names that

@@ -89,6 +89,31 @@ func (l Level) String() string {
 	return fmt.Sprintf("LEVEL_%d", int(l))
 }
 
+// Role names who a rung is, in the vocabulary section 3.0 and the section 5.0
+// rule table use. String gives the position (LEVEL_2); this gives the people
+// (ABT team leads), which is what a reader in a chat space needs to know to
+// tell whether the escalation has reached them.
+//
+// The pooled variants rules R3, R4, R7, R8, R13 and R14 select are not
+// separate rungs — they are these same rungs resolved to a shift-wide pool —
+// so the role here stays the rung's, and who it actually reached is the
+// recipient's own name beside it.
+func (l Level) Role() string {
+	switch l {
+	case Level0:
+		return "Rotation lead or members"
+	case Level1:
+		return "ABT or sub leads"
+	case Level2:
+		return "ABT or sub team leads"
+	case Level3:
+		return "Head of business unit"
+	case Level4:
+		return "Head of customer success"
+	}
+	return "Unknown rung"
+}
+
 // LevelPolicy is one row of the section 7.0 timing table.
 //
 // The specification defines a level's duration as:

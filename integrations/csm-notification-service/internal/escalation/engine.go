@@ -29,6 +29,7 @@ import (
 	"github.com/wso2-open-operations/cs-tools/integrations/csm-notification-service/internal/eventbus"
 	"github.com/wso2-open-operations/cs-tools/integrations/csm-notification-service/internal/events"
 	"github.com/wso2-open-operations/cs-tools/integrations/csm-notification-service/internal/notifications"
+	"github.com/wso2-open-operations/cs-tools/integrations/csm-notification-service/internal/recipientlinks"
 )
 
 // callPlacer abstracts notifications.TwilioClient's two call methods.
@@ -64,6 +65,11 @@ type EngineConfig struct {
 	CallSendingEnabled bool
 	// UseSSML picks Trigger.VoiceSpeech over Trigger.VoiceMessagePlain.
 	UseSSML bool
+	// Channel selects how a rung reaches people: the specification's phone
+	// call, a card in the incident's Google Chat space, or both. Defaults to
+	// calls — see ParseChannel for why silently downgrading a pager would be
+	// the wrong default.
+	Channel Channel
 }
 
 // Engine runs the incident call-escalation ladder.
@@ -76,10 +82,12 @@ type EngineConfig struct {
 type Engine struct {
 	policies map[string]PriorityPolicy
 	resolver Resolver
-	calls    callPlacer
-	store    ladderStore
-	notes    incidentNotes
-	cfg      EngineConfig
+	// notifiers is how a rung reaches people, one per selected channel. The
+	// ladder's rules know nothing about which are in play.
+	notifiers []notifier
+	store     ladderStore
+	notes     incidentNotes
+	cfg       EngineConfig
 	// clock is time.Now unless a test substitutes one; the staleness check
 	// in start is the only thing that reads it, and it has to be testable
 	// against a trigger that is genuinely old.
@@ -102,10 +110,28 @@ func (e *Engine) now() time.Time {
 // straight into the incidentNotes interface field would store a non-nil
 // interface holding a nil pointer, so writeNote's `e.notes == nil` would be
 // false and it would call AppendWorkNote on a nil receiver.
-func NewEngine(policies map[string]PriorityPolicy, resolver Resolver, calls *notifications.TwilioClient, store *Store, notes *EntityClient, cfg EngineConfig) *Engine {
-	e := &Engine{policies: policies, resolver: resolver, calls: calls, store: store, cfg: cfg}
+func NewEngine(policies map[string]PriorityPolicy, resolver Resolver, calls *notifications.TwilioClient, chat *notifications.GoogleChatClient, links *recipientlinks.Resolver, store *Store, notes *EntityClient, defaultChatProduct string, cfg EngineConfig) *Engine {
+	e := &Engine{policies: policies, resolver: resolver, store: store, cfg: cfg}
 	if notes != nil {
 		e.notes = notes
+	}
+	if cfg.Channel.Uses(ChannelCall) && calls != nil {
+		e.notifiers = append(e.notifiers, voiceNotifier{calls: calls, useSSML: cfg.UseSSML})
+	}
+	if cfg.Channel.Uses(ChannelChat) && chat != nil {
+		// links goes in only when it is really there, for the same reason
+		// notes does above and with the same trap: assigning a nil
+		// *recipientlinks.Resolver straight into the incidentLinker field
+		// stores a non-nil interface holding a nil pointer, so the nil check
+		// inside Deliver passes and IncidentLink is called on a nil receiver.
+		// That is a panic in the middle of paging someone, and it is exactly
+		// the mistake the notes parameter already documents — made twice in
+		// one constructor before a real run caught it.
+		n := chatNotifier{chat: chat, defaultProduct: defaultChatProduct}
+		if links != nil {
+			n.links = links
+		}
+		e.notifiers = append(e.notifiers, n)
 	}
 	return e
 }
@@ -452,44 +478,57 @@ func (e *Engine) processDue(ctx context.Context, member string) error {
 	return nil
 }
 
-// place dials one recipient, or logs the call when sending is disabled.
+// place notifies one recipient over every configured channel, or logs what it
+// would have done when sending is disabled.
 //
-// Two lines, not one, and both matter when something goes wrong at 3am. The
-// first is written BEFORE the request, so a call that hangs or crashes the
+// Two log lines, not one, and both matter when something goes wrong at 3am.
+// The first is written BEFORE the attempt, so one that hangs or crashes the
 // process still leaves a record that this rung was about to page someone. The
-// second is written after the provider accepts it, and carries the call's sid
-// — the only durable handle on a call once this function returns, and what an
-// operator searches the console by to find out whether it actually rang, was
-// answered, or went to voicemail.
+// second is written after a channel accepts it, and carries the provider's own
+// handle where there is one — a Twilio call sid is what an operator searches
+// the console by to find out whether it actually rang.
+//
+// Every channel is attempted even if an earlier one fails, and the errors are
+// joined: a chat webhook being down must not stop the phone ringing, and a
+// phone failing must not cost the room its sight of the escalation.
 func (e *Engine) place(ctx context.Context, t Trigger, call PlannedCall) error {
 	if !e.cfg.CallSendingEnabled {
-		slog.InfoContext(ctx, "escalation: call sending disabled (CALL_SENDING_ENABLED=false); not calling",
+		slog.InfoContext(ctx, "escalation: sending disabled (CALL_SENDING_ENABLED=false); not notifying",
 			"incidentId", t.IncidentID, "rule", t.Routing.Rule(), "priority", t.Priority,
 			"level", call.Level.String(), "attempt", call.Ordinal,
-			"to", maskPhone(call.Recipient.Phone))
+			"channel", string(e.cfg.Channel), "to", maskPhone(call.Recipient.Phone))
 		return nil
 	}
-	slog.InfoContext(ctx, "escalation: placing call",
-		"incidentId", t.IncidentID, "rule", t.Routing.Rule(), "priority", t.Priority,
-		"level", call.Level.String(), "attempt", call.Ordinal,
-		"to", maskPhone(call.Recipient.Phone), "message", messageKind(e.cfg.UseSSML))
+	if len(e.notifiers) == 0 {
+		// Configured for a channel whose client was never constructed. Not an
+		// error to retry — no tick will fix it — but never silent either.
+		slog.ErrorContext(ctx, "escalation: no notifier configured for this channel; nobody was contacted",
+			"incidentId", t.IncidentID, "channel", string(e.cfg.Channel),
+			"level", call.Level.String(), "attempt", call.Ordinal)
+		return nil
+	}
 
-	var placed notifications.Call
-	var err error
-	if e.cfg.UseSSML {
-		placed, err = e.calls.MakeSSMLCall(ctx, call.Recipient.Phone, t.VoiceSpeech())
-	} else {
-		placed, err = e.calls.MakeCall(ctx, call.Recipient.Phone, t.VoiceMessagePlain())
-	}
-	if err != nil {
-		return err
-	}
-	slog.InfoContext(ctx, "escalation: ALERT TRIGGERED — the phone is ringing",
+	slog.InfoContext(ctx, "escalation: notifying",
 		"incidentId", t.IncidentID, "rule", t.Routing.Rule(), "priority", t.Priority,
 		"level", call.Level.String(), "attempt", call.Ordinal,
-		"to", maskPhone(call.Recipient.Phone), "recipient", call.Recipient.Name,
-		"callSid", placed.SID, "callStatus", placed.Status)
-	return nil
+		"channel", string(e.cfg.Channel), "to", maskPhone(call.Recipient.Phone),
+		"message", messageKind(e.cfg.UseSSML))
+
+	var errs []error
+	for _, n := range e.notifiers {
+		delivered, err := n.Deliver(ctx, t, call)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", n.Channel(), err))
+			continue
+		}
+		slog.InfoContext(ctx, "escalation: ALERT TRIGGERED",
+			"incidentId", t.IncidentID, "rule", t.Routing.Rule(), "priority", t.Priority,
+			"level", call.Level.String(), "attempt", call.Ordinal,
+			"recipient", call.Recipient.Name, "to", maskPhone(call.Recipient.Phone),
+			"channel", string(delivered.Channel), "ref", delivered.Ref,
+			"status", delivered.Status)
+	}
+	return errors.Join(errs...)
 }
 
 // messageKind names which voice document a call carried, so a log line says

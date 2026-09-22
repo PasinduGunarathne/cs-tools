@@ -147,14 +147,17 @@ func (f *fakeNotes) AppendWorkNote(_ context.Context, _, note string) error {
 var testClock = ist(2026, 9, 9, 10, 0)
 
 func testEngine(store ladderStore, caller callPlacer, notes incidentNotes, cfg EngineConfig) *Engine {
+	if cfg.Channel == "" {
+		cfg.Channel = ChannelCall
+	}
 	return &Engine{
-		policies: DefaultPolicy,
-		resolver: fullResolver(),
-		calls:    caller,
-		store:    store,
-		notes:    notes,
-		cfg:      cfg,
-		clock:    func() time.Time { return testClock },
+		policies:  DefaultPolicy,
+		resolver:  fullResolver(),
+		notifiers: []notifier{voiceNotifier{calls: caller, useSSML: cfg.UseSSML}},
+		store:     store,
+		notes:     notes,
+		cfg:       cfg,
+		clock:     func() time.Time { return testClock },
 	}
 }
 
@@ -697,7 +700,7 @@ func containsAll(s string, subs ...string) bool {
 // trap in NewEngine: a nil *EntityClient assigned straight into the
 // incidentNotes field would make writeNote call a nil receiver and panic.
 func TestNewEngine_NilNotesClientDoesNotPanic(t *testing.T) {
-	e := NewEngine(DefaultPolicy, fullResolver(), nil, nil, nil, enabled())
+	e := NewEngine(DefaultPolicy, fullResolver(), nil, nil, nil, nil, nil, "", enabled())
 	if e.notes != nil {
 		t.Fatal("a nil *EntityClient must leave the interface field nil, not hold a nil pointer")
 	}

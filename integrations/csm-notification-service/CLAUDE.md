@@ -210,6 +210,20 @@ ticker, with Redis as its only durable state — the same `REDIS_URL`/
   engine's — this engine's job is placing calls; the summary is a record.
   Loop-safe: a work-notes-only PATCH publishes no escalation signal, and
   `incident.comment_added` comes from a different endpoint this never calls.
+- **`notifier.go` - which channel a rung reaches people on.** The ladder's
+  timing, routing and cancellation are channel-agnostic; only the last hop
+  differs. `INCIDENT_ESCALATION_CHANNEL` picks `call` (the specification's
+  own, and the default), `chat` (a card in the incident's Google Chat space
+  via `SendEscalationAlert`), or `both`. **A chat card does not wake anyone**
+  - the initial Chat alert already exists and the ladder exists because it
+  was not enough overnight - so `chat` alone is a real reduction in what the
+  feature does. Where it earns its place is alongside the calls, giving the
+  room sight of an escalation climbing, and as the only channel exercisable
+  end to end without a telephony account. Chat posts **once per rung**, not
+  per attempt: a rung's repeats exist because a phone went unanswered, a
+  question a posted card cannot ask, and a P1 ladder's fourteen attempts
+  would bury the room. With `both`, each channel is attempted even if the
+  other fails.
 - **`internal/notifications/ssml.go`.** `MakeSSMLCall` speaks a typed
   `Speech` tree as real nested SSML inside `<Say>`. It exists because
   `MakeCall`'s chardata escaping — correct, and what stops TwiML injection —

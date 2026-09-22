@@ -100,13 +100,16 @@ func wiredEngine(t *testing.T, spy *twilioSpy, cfg EngineConfig, ringSeconds int
 		RingTimeoutSeconds: ringSeconds,
 	})
 	store := newMemStore()
+	if cfg.Channel == "" {
+		cfg.Channel = ChannelCall
+	}
 	e := &Engine{
-		policies: DefaultPolicy,
-		resolver: perRungResolver(),
-		calls:    client,
-		store:    store,
-		cfg:      cfg,
-		clock:    func() time.Time { return testClock },
+		policies:  DefaultPolicy,
+		resolver:  perRungResolver(),
+		notifiers: []notifier{voiceNotifier{calls: client, useSSML: cfg.UseSSML}},
+		store:     store,
+		cfg:       cfg,
+		clock:     func() time.Time { return testClock },
 	}
 	return e, store, srv.Close
 }
