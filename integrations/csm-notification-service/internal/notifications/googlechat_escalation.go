@@ -48,6 +48,11 @@ type EscalationAlert struct {
 	// RungRole names who that rung is, e.g. "ABT team leads".
 	RungRole string
 	// Attempt is which notification of this rung it is, 1-based.
+	//
+	// Not rendered. The escalation engine posts one card per rung, so every
+	// card it builds is attempt 1, and a line reporting that would say
+	// nothing. Kept on the struct because it is part of what a rung is, and a
+	// caller outside that flow may have a reason to show it.
 	Attempt int
 	// Priority is the incident's priority, which sets the whole clock.
 	Priority string
@@ -82,8 +87,14 @@ func (c *GoogleChatClient) SendEscalationAlert(ctx context.Context, a Escalation
 	if a.IncidentRef == "" {
 		return fmt.Errorf("notifications: incidentRef is required")
 	}
+	return c.sendCard(ctx, a.Product, buildEscalationCard(a))
+}
 
-	header := fmt.Sprintf("%s escalated to %s", escalationSeverityMark(a.Priority), a.Rung)
+// buildEscalationCard assembles the card, split from the send so its exact
+// shape can be asserted on without a webhook.
+func buildEscalationCard(a EscalationAlert) chatCardMessage {
+
+	header := fmt.Sprintf("%s %s %s", escalationSeverityMark(a.Priority), rungVerb(a.Rung), a.Rung)
 	subtitle := a.IncidentRef
 	if a.Title != "" {
 		subtitle = a.IncidentRef + " - " + a.Title
@@ -99,9 +110,6 @@ func (c *GoogleChatClient) SendEscalationAlert(ctx context.Context, a Escalation
 	body.WriteString(caseAlertLine(`<font color="#5F6368">Priority %s</font>`, a.Priority))
 	if a.Elapsed != "" {
 		body.WriteString(caseAlertLine(`<font color="#5F6368"> - unattended %s</font>`, a.Elapsed))
-	}
-	if a.Attempt > 1 {
-		body.WriteString(caseAlertLine(`<font color="#5F6368"> - reminder %d</font>`, fmt.Sprint(a.Attempt)))
 	}
 	if a.Rule != "" {
 		body.WriteString("<br>")
@@ -129,7 +137,22 @@ func (c *GoogleChatClient) SendEscalationAlert(ctx context.Context, a Escalation
 			},
 		}},
 	}
-	return c.sendCard(ctx, a.Product, msg)
+	return msg
+}
+
+// rungVerb keeps the header honest about what LEVEL_0 is.
+//
+// Section 3.0 calls it the notification level and says in as many words that
+// it is "represented as the initial escalation level (but not an actual
+// escalation level)" - it exists to tell the rotation an incident has arrived,
+// before any escalation has happened. A card announcing "escalated to LEVEL_0"
+// contradicts the document it implements, and tells a reader the incident has
+// already been through a rung it has not.
+func rungVerb(rung string) string {
+	if rung == "LEVEL_0" {
+		return "notifying"
+	}
+	return "escalated to"
 }
 
 // escalationSeverityMark gives the header a glyph that reads at a glance in a
