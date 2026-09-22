@@ -23,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wso2-open-operations/cs-tools/integrations/csm-notification-service/internal/events"
 	"github.com/wso2-open-operations/cs-tools/integrations/csm-notification-service/internal/notifications"
 )
 
@@ -350,4 +351,77 @@ func TestNewEngine_NilLinksLeavesTheFieldNil(t *testing.T) {
 	if n.links != nil {
 		t.Error("a nil resolver was stored as a non-nil interface; Deliver would call a nil receiver")
 	}
+}
+
+// The ladder climbs over time and stops the moment somebody picks the
+// incident up, on chat exactly as on calls. The pacing and the cancellation
+// both live in the engine, above the channel, so neither changes with it -
+// this pins that, because a channel that posted its whole ladder at once
+// would be a notification dump rather than an escalation.
+func TestChatChannel_ClimbsOverTimeAndStopsOnAcknowledgement(t *testing.T) {
+	chat, store := &fakeChat{}, newMemStore()
+	e := chatEngine(t, chat, store, &fakeNotes{})
+
+	at := ist(2026, 9, 9, 10, 0)
+	if err := e.Handle(context.Background(), createdEvent(t, "CRITICAL", at)); err != nil {
+		t.Fatal(err)
+	}
+
+	// Nothing is due before the priority's own initial wait, however often
+	// the engine ticks.
+	for _, early := range []time.Duration{0, time.Minute, 5 * time.Minute} {
+		if err := e.Tick(context.Background(), at.Add(early)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(chat.posted) != 0 {
+		t.Fatalf("%d cards posted inside P1's six-minute initial wait", len(chat.posted))
+	}
+
+	// LEVEL_1 opens at six minutes, and only LEVEL_1.
+	if err := e.Tick(context.Background(), at.Add(6*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if len(chat.posted) != 1 || chat.posted[0].Rung != "LEVEL_1" {
+		t.Fatalf("after six minutes: %d cards, first %v; want one LEVEL_1 card", len(chat.posted), rungsOf(chat.posted))
+	}
+
+	// LEVEL_2 does not open until fifteen: the initial wait plus LEVEL_1's
+	// own duration, which is (3 calls x 2m) + 3m. This incident was reported
+	// during business hours, so it has no LEVEL_0 and nothing else is in
+	// front of it.
+	if err := e.Tick(context.Background(), at.Add(14*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if len(chat.posted) != 1 {
+		t.Errorf("a later rung posted early: %v", rungsOf(chat.posted))
+	}
+	if err := e.Tick(context.Background(), at.Add(15*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if len(chat.posted) != 2 || chat.posted[1].Rung != "LEVEL_2" {
+		t.Fatalf("after fifteen minutes: %v; want LEVEL_1 then LEVEL_2", rungsOf(chat.posted))
+	}
+
+	// Somebody picks it up. Every remaining rung is cancelled.
+	ack := record(t, events.TypeIncidentCommentAdded, events.IncidentCommentAddedPayload{
+		CommentID: "c-1", IsPublic: true,
+	})
+	if err := e.Handle(context.Background(), ack); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.Tick(context.Background(), at.Add(3*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if len(chat.posted) != 2 {
+		t.Errorf("cards kept arriving after the acknowledgement: %v", rungsOf(chat.posted))
+	}
+}
+
+func rungsOf(alerts []notifications.EscalationAlert) []string {
+	out := make([]string, 0, len(alerts))
+	for _, a := range alerts {
+		out = append(out, a.Rung)
+	}
+	return out
 }
