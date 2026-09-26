@@ -25,6 +25,14 @@ interface WeekTableProps {
   weekStart: Date;
   assignments: ScheduleAssignment[];
   shifts: Map<string, ScheduleShift>;
+  /** The page's own group and team state, rendered here as well as in the
+   *  toolbar -- one control in two places, the way the prototype does it, not
+   *  a second copy with its own mind. See MonthRoster for the same pair. */
+  family: "CRE" | "SRE";
+  onFamilyChange: (family: "CRE" | "SRE") => void;
+  teamKey: string;
+  onTeamKeyChange: (teamKey: string) => void;
+  teams: string[];
 }
 
 /** Minutes past the authoring midnight as HH:MM, wrapping past 24h. */
@@ -39,7 +47,16 @@ function fmtMinute(m: number): string {
  * every name -- which the first draft of the prototype did -- tells the reader
  * nothing they have not already read on the left.
  */
-export default function WeekTable({ weekStart, assignments, shifts }: WeekTableProps): JSX.Element {
+export default function WeekTable({
+  weekStart,
+  assignments,
+  shifts,
+  family,
+  onFamilyChange,
+  teamKey,
+  onTeamKeyChange,
+  teams,
+}: WeekTableProps): JSX.Element {
   const days = useMemo(() => Array.from({ length: 7 }, (_, i) => addDays(weekStart, i)), [weekStart]);
 
   const rows = useMemo(() => {
@@ -51,12 +68,68 @@ export default function WeekTable({ weekStart, assignments, shifts }: WeekTableP
 
   const todayIso = toIsoDate(new Date());
 
+  /** Distinct people on the rota this week, not rows: one engineer covering
+   *  three rotations is one engineer. */
+  const headcount = useMemo(
+    () => new Set(assignments.map((a) => a.engineer.userId)).size,
+    [assignments],
+  );
+
+  const head = (
+    <div className="card-head">
+      <div className="seg teamseg" role="tablist" aria-label="Show CRE or SRE">
+        {(["CRE", "SRE"] as const).map((f) => (
+          <button
+            key={f}
+            role="tab"
+            aria-selected={family === f}
+            className={family === f ? "on" : ""}
+            onClick={() => onFamilyChange(f)}
+          >
+            {f}
+          </button>
+        ))}
+      </div>
+
+      <h2>
+        This week <span className="count">{headcount}</span>
+      </h2>
+
+      <div className="tools">
+        <span className="rng">
+          {shortDayName(weekStart)} {weekStart.getDate()} – {shortDayName(addDays(weekStart, 6))}{" "}
+          {addDays(weekStart, 6).getDate()}
+        </span>
+        <select
+          className="teampick"
+          aria-label="Show one team"
+          value={teamKey}
+          onChange={(e) => onTeamKeyChange(e.target.value)}
+        >
+          <option value="">All teams</option>
+          {teams.map((t) => (
+            <option key={t} value={t}>
+              {t.charAt(0).toUpperCase() + t.slice(1)}
+            </option>
+          ))}
+        </select>
+      </div>
+    </div>
+  );
+
   if (rows.length === 0) {
-    return <div className="offnone">Nobody is on the rota this week.</div>;
+    return (
+      <>
+        {head}
+        <div className="offnone">Nobody is on the rota this week.</div>
+      </>
+    );
   }
 
   return (
-    <div className="twwrap">
+    <>
+      {head}
+      <div className="twwrap weekwrap">
       <table className="tw">
         <thead>
           <tr>
@@ -118,6 +191,7 @@ export default function WeekTable({ weekStart, assignments, shifts }: WeekTableP
           })}
         </tbody>
       </table>
-    </div>
+      </div>
+    </>
   );
 }

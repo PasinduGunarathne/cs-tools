@@ -310,45 +310,7 @@
    Thirty-one columns only fit if a cell is a short code, so the grid is
    tightened and the engineer column pinned: scrolling sideways through a
    month is useless if you lose track of whose row you are on. */
-/*
- * The roster's own bar. What you are looking at sits on the left and the
- * search sits on the right, where a search box is looked for.
- *
- * The group and team controls are deliberately not repeated here: they are in
- * the page toolbar above and already filter this view. Two copies of one
- * control that must agree with each other is a defect waiting to happen, so
- * the scope is stated instead.
- */
-.csm-ts .rosterbar {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin: 0 0 10px;
-}
-.csm-ts .rosterbar .scope {
-  font-size: 12px;
-  color: var(--muted);
-}
-.csm-ts .rosterbar .scope b {
-  color: var(--ink-2);
-  font-weight: 700;
-}
-.csm-ts .rosterbar .rosterq {
-  margin-left: auto;
-}
-.csm-ts .rosterq {
-  flex: 0 1 280px;
-  font: inherit;
-  padding: 6px 10px;
-  border-radius: 8px;
-  border: 1px solid var(--line-2);
-  background: var(--surface);
-  color: var(--ink);
-}
-.csm-ts .rosterq:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
-}
+
 .csm-ts .tw.roster th,
 .csm-ts .tw.roster td {
   padding: 2px 3px;
@@ -390,4 +352,189 @@
 }
 .csm-ts .tw.roster .none {
   color: var(--faint);
+}
+
+
+/* ── The month roster scrolls as one surface ─────────────────────────────
+   It used to have no scroller of its own at all: the table simply grew, the
+   card grew with it, and the only thing that scrolled was the page. Sticky
+   then resolved against the page, so the date row detached from its own card
+   and floated over whatever else was on screen, and a month wider than the
+   window had nowhere to go. One bounded box, scrolling both ways, fixes both
+   -- the same shape the day ladder already uses, and the reason its own
+   headings behave. */
+.csm-ts .twwrap {
+  overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+}
+
+.csm-ts .rostwrap {
+  /* Tied to the viewport rather than a fixed height, so a tall screen shows
+     more engineers instead of empty card. The floor keeps it usable on a
+     laptop; the ceiling stops it running away on a wallboard. */
+  max-height: clamp(360px, calc(100vh - 330px), 1400px);
+  border-radius: 0 0 12px 12px;
+}
+
+/* The head is the card's, not the scroller's -- it names what is below it, so
+   it must not scroll away from it. */
+.csm-ts .card > .card-head + .twwrap {
+  border-top: 0;
+}
+
+/* Both axes are pinned, so the four sticky layers have to agree on who covers
+   whom: the corner over the date row, the date row over the engineer column,
+   and the engineer column over the cells it is there to keep attached. */
+.csm-ts .tw.roster thead th.lab {
+  /* The corner where the two axes cross. */
+  z-index: 5;
+}
+
+/* The range/date line in a card head. The prototype has one in the day and
+   week heads; it was only ever styled inside .tgrid, which the React views do
+   not use. */
+.csm-ts .card-head .rng {
+  font-size: 12.5px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+/* The week table is the one card whose head sits above a table that is not
+   itself bounded -- it is seven columns, so it needs no scroller of its own,
+   only somewhere to go if the window is narrow. */
+.csm-ts .weekwrap {
+  max-height: clamp(360px, calc(100vh - 330px), 1400px);
+  border-radius: 0 0 12px 12px;
+}
+
+/* The day the picker is sitting on, marked down the whole column.
+   Marking only the header would be marking the wrong thing: the roster is
+   read by scanning a column of thirty-odd cells, so a header tint leaves the
+   eye to track 44px of unmarked grid on its own. Today keeps its filled
+   circle -- today is a fact and this is a choice, and the two want to stay
+   legible when they land on the same day. */
+.csm-ts .roster th.day.sel,
+.csm-ts .roster td.sel {
+  background: var(--accent-soft);
+  box-shadow:
+    inset 1px 0 0 var(--accent),
+    inset -1px 0 0 var(--accent);
+}
+.csm-ts .roster th.day.sel {
+  box-shadow:
+    inset 1px 1px 0 var(--accent),
+    inset -1px 0 0 var(--accent);
+}
+.csm-ts .roster tbody tr:last-child td.sel {
+  box-shadow:
+    inset 1px 0 0 var(--accent),
+    inset -1px -1px 0 var(--accent);
+}
+.csm-ts .roster th.day.sel .d {
+  color: var(--accent);
+  font-weight: 800;
+}
+/* Both at once: the circle already carries the accent as a fill, so the
+   numeral stays white and the column tint does the choosing. */
+.csm-ts .roster th.day.sel.today .d {
+  color: #fff;
+}
+
+/* All three cards now carry a head of their own, so the scrollers underneath
+   them have that much less of the window to spend. Budgeted once, here, rather
+   than three slightly different guesses -- this overrides the day ladder's own
+   earlier figure, which was set when it had no head above it. */
+.csm-ts .ladwrap,
+.csm-ts .rostwrap,
+.csm-ts .weekwrap {
+  max-height: clamp(360px, calc(100vh - 360px), 1400px);
+}
+
+/* Six zone columns and an off-rota lane have to fit beside an expanded
+   sidebar, not just a collapsed one -- with the nav open the day was 108px
+   wider than the card and scrolled again, which is the thing it was widened
+   to avoid. The off-rota lane gives back the last of it: it holds names and a
+   tag, not a timeline, so it needs the least. */
+.csm-ts .ladder .lane.offlane,
+.csm-ts .ladhd .lnh.offhd {
+  flex: 0 0 clamp(168px, 15%, 194px);
+}
+
+/* Off rota is a list, not a timeline: nothing in it is positioned against the
+   hour axis, so a name there can take a second line. Everywhere else an
+   ellipsis is the right trade -- the card has to stay the width of its hour
+   band -- but here it bought nothing and cost the back half of a name. */
+.csm-ts .ladder .offlane .lnm {
+  align-items: flex-start;
+}
+
+.csm-ts .ladder .offlane .lnm .who {
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
+  line-height: 1.35;
+}
+
+/* "Rotations only": fade what is not a turn on the rota, rather than remove it.
+   Removing would change the shape of the month under the reader and lose the
+   reason someone is absent from it -- which is usually the next question. */
+.csm-ts .roster td.muted .chip {
+  opacity: 0.18;
+  filter: grayscale(1);
+}
+.csm-ts .rotonly {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  white-space: nowrap;
+  font-size: 12.5px;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 0 4px;
+  user-select: none;
+}
+.csm-ts .rotonly:hover {
+  color: var(--ink);
+}
+.csm-ts .rotonly input {
+  width: 15px;
+  height: 15px;
+  margin: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+/* On, the label stops being a hint and starts being a statement of what the
+   grid is currently showing. */
+.csm-ts .rotonly:has(input:checked) {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+/* A week cell is a table cell: it can get taller, so a name that does not fit
+   across should go down a line rather than lose its second half. The ladder
+   cannot do this -- its blocks are positioned against the hour axis at a fixed
+   height -- which is why only the week table gets it. Below roughly 1100px of
+   content the seven day columns are narrower than a full name, which is a
+   1440px laptop with the sidebar open, not only a squeezed window. */
+.csm-ts .weekwrap .tw .nm .who {
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
+  overflow-wrap: anywhere;
+}
+
+/* The last four pixels.
+ *
+ * In the single-column CRE lane one row carries both the longest name and a
+ * Lead tag, and came up 4px short -- everyone else fits. Rather than shrink
+ * the name or drop the tag, the row gives back the space it was spending on
+ * separation: 3px still reads as a gap at this size, and the tag's own
+ * padding was doing the same job twice. */
+.csm-ts .ladder .lncols.one .lnm {
+  gap: 3px;
+}
+
+.csm-ts .ladder .lncols.one .lnm .lead-t {
+  padding: 0 4px;
 }

@@ -91,6 +91,20 @@ export default function CsmTeamSchedulePage(): JSX.Element {
   const catalogue = useScheduleCatalogue();
 
   const weekStart = useMemo(() => mondayOf(anchor), [anchor]);
+  /** The group/team controls the cards render in their own heads. It is the
+   *  page's state either way -- the toolbar and the card head are two views of
+   *  one control, which is why they can never disagree. */
+  const scopeControls = {
+    family,
+    onFamilyChange: (f: Family) => {
+      setFamily(f);
+      setTeamKey("");
+    },
+    teamKey,
+    onTeamKeyChange: setTeamKey,
+    teams: TEAMS[family],
+  };
+
   const dayView = tab === "today";
   const rosterView = tab === "roster";
   const monthStart = useMemo(
@@ -197,35 +211,11 @@ export default function CsmTeamSchedulePage(): JSX.Element {
 
           <div className="tabright">
             <div className="controls">
-              <div className="seg">
-                {(["CRE", "SRE"] as Family[]).map((f) => (
-                  <button
-                    key={f}
-                    className={family === f ? "on" : ""}
-                    onClick={() => {
-                      setFamily(f);
-                      setTeamKey("");
-                    }}
-                  >
-                    {f}
-                  </button>
-                ))}
-              </div>
-
-              <select
-                className="teampick"
-                aria-label="Show one team"
-                value={teamKey}
-                onChange={(e) => setTeamKey(e.target.value)}
-              >
-                <option value="">All teams</option>
-                {TEAMS[family].map((t) => (
-                  <option key={t} value={t}>
-                    {t.charAt(0).toUpperCase() + t.slice(1)}
-                  </option>
-                ))}
-              </select>
-
+              {/* The group and team controls used to live here. Every card now
+                  carries them in its own head, where the reader is actually
+                  looking, so a second copy up here is just something else to
+                  keep in step. The toolbar keeps what is genuinely about the
+                  page rather than the card: which date you are on. */}
               <div className="monthnav">
                 <button onClick={() => setAnchor(stepBy(anchor, tab, -1))} title="Previous">
                   &laquo;
@@ -242,6 +232,37 @@ export default function CsmTeamSchedulePage(): JSX.Element {
                 <button onClick={() => setAnchor(stepBy(anchor, tab, 1))} title="Next">
                   &raquo;
                 </button>
+                {/* Stepping a day at a time is fine for next week and hopeless
+                    for next quarter, so the date is also directly selectable. */}
+                <label className="jump" title="Jump to a date">
+                  <svg
+                    width="15"
+                    height="15"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    aria-hidden="true"
+                  >
+                    <rect x="3" y="5" width="18" height="16" rx="2" />
+                    <path d="M8 3v4M16 3v4M3 10h18" />
+                  </svg>
+                  <input
+                    id="ts-date-jump"
+                    type="date"
+                    aria-label="Jump to a date"
+                    value={toIsoDate(anchor)}
+                    onChange={(e) => {
+                      const picked = e.target.value;
+                      if (!picked) return;
+                      // Parsed as local midnight, not UTC: `new Date("2026-09-21")`
+                      // is UTC midnight, which lands on the 20th for anyone west
+                      // of Greenwich and silently shows the wrong day.
+                      const [y, m, d] = picked.split("-").map(Number);
+                      setAnchor(new Date(y, m - 1, d));
+                    }}
+                  />
+                </label>
               </div>
               <button className="btn" onClick={() => setAnchor(new Date())}>
                 Today
@@ -265,17 +286,19 @@ export default function CsmTeamSchedulePage(): JSX.Element {
               zones={zones}
               absences={absences.data?.absences ?? []}
               absenceKinds={catalogue.data?.absenceKinds ?? []}
+              {...scopeControls}
             />
           ) : tab === "week" ? (
-            <WeekTable weekStart={weekStart} assignments={rows} shifts={shifts} />
+            <WeekTable weekStart={weekStart} assignments={rows} shifts={shifts} {...scopeControls} />
           ) : tab === "roster" ? (
             <MonthRoster
+              selectedIso={toIsoDate(anchor)}
               month={monthStart}
               assignments={rows}
               absences={absences.data?.absences ?? []}
               shifts={shifts}
               absenceKinds={catalogue.data?.absenceKinds ?? []}
-              scope={`${family} · ${teamKey ? teamKey.charAt(0).toUpperCase() + teamKey.slice(1) : "All teams"}`}
+              {...scopeControls}
             />
           ) : (
             <MyWeekStrip

@@ -16,14 +16,14 @@
  * under the License.
  */
 
-import { useMemo, useState, type JSX } from "react";
+import { useEffect, useMemo, useRef, useState, type JSX } from "react";
 import type {
   ScheduleAbsence,
   ScheduleAbsenceKind,
   ScheduleAssignment,
   ScheduleShift,
 } from "../types";
-import { initialsOf, toIsoDate } from "../utils/rota";
+import { initialsOf, isRotationShift, toIsoDate } from "../utils/rota";
 import { teamColour } from "../utils/rotaHues";
 
 interface MonthRosterProps {
@@ -32,15 +32,34 @@ interface MonthRosterProps {
   absences: ScheduleAbsence[];
   shifts: Map<string, ScheduleShift>;
   absenceKinds: ScheduleAbsenceKind[];
-  /** What the page toolbar is currently filtered to, stated so the roster
-   *  does not look like it is showing everyone when it is not. */
-  scope: string;
+  /** The day the date picker is sitting on, as YYYY-MM-DD.
+   *
+   *  Distinct from today: today is a fact, this is a choice. The roster is a
+   *  month wide, so a choice the grid does not show is a choice the reader
+   *  cannot see they made. */
+  selectedIso: string;
+  /** The group and team the page is filtered to, and the means to change them.
+   *
+   *  The prototype puts these in the card's own head rather than only in the
+   *  page toolbar, and it is right to: the roster is the view where "which
+   *  engineers am I looking at" is the whole question, so the answer belongs
+   *  where the answer is read. They are the page's own state passed down, not
+   *  a second copy -- one control rendered in two places, which is why the
+   *  toolbar above stays in step with them. */
+  family: "CRE" | "SRE";
+  onFamilyChange: (family: "CRE" | "SRE") => void;
+  teamKey: string;
+  onTeamKeyChange: (teamKey: string) => void;
+  teams: string[];
 }
 
 interface Cell {
   code: string;
   token: string;
   title: string;
+  /** A turn on the rota, as opposed to leave, an allocation, or the standing
+   *  regular-hours window that most of the team sits in on a normal day. */
+  isRotation: boolean;
 }
 
 /**
@@ -57,9 +76,25 @@ export default function MonthRoster({
   absences,
   shifts,
   absenceKinds,
-  scope,
+  selectedIso,
+  family,
+  onFamilyChange,
+  teamKey,
+  onTeamKeyChange,
+  teams,
 }: MonthRosterProps): JSX.Element {
   const [query, setQuery] = useState("");
+  /** Fade everything that is not a turn on the rota.
+   *
+   *  A month of 122 engineers is mostly leave and allocations by volume, and
+   *  they are the same size and weight as the rota chips, so "who is actually
+   *  on next Tuesday" is a hard question to read off the grid. This does not
+   *  filter -- the cells stay where they are, so the shape of the month does
+   *  not change under the reader; they simply stop competing. */
+  const [rotationsOnly, setRotationsOnly] = useState(false);
+
+  const wrapRef = useRef<HTMLDivElement | null>(null);
+  const touched = useRef(false);
 
   const days = useMemo(() => {
     const first = new Date(month.getFullYear(), month.getMonth(), 1);
@@ -95,8 +130,12 @@ export default function MonthRoster({
       // A tier beats the plain window it sits in: "L1" says more than "TZ1".
       const code = a.tier ?? shift?.shortCode ?? a.shiftCode;
       const token = a.tier ?? shift?.colourToken ?? "";
+      // The helper reads the shift's code; when the catalogue has not got the
+      // shift we still hold that code on the assignment, so fall back to it
+      // rather than calling a real rota turn something else.
+      const isRotation = shift ? isRotationShift(shift) : !a.shiftCode.includes("REGULAR");
       if (!existing || a.tier) {
-        row.days.set(a.rotaDate, { code, token, title: shift?.label ?? a.shiftCode });
+        row.days.set(a.rotaDate, { code, token, title: shift?.label ?? a.shiftCode, isRotation });
       }
     }
 
@@ -113,6 +152,7 @@ export default function MonthRoster({
             code: kind?.shortCode ?? ab.kindCode,
             token: kind?.colourToken ?? "",
             title: kind?.label ?? ab.kindCode,
+            isRotation: false,
           });
         }
       }
@@ -130,24 +170,122 @@ export default function MonthRoster({
 
   const todayIso = toIsoDate(new Date());
 
+  /** The month as a stable key: the Date itself is a fresh object each render. */
+  const monthIso = toIsoDate(days[0]);
+
+  // Open on today, the way the day view opens on the current hour. A month is
+  // thirty-odd columns and only a third of them fit, so landing on the 1st
+  // means every reader starts by scrolling to where they already were.
+  //
+  // Today is what they asked for, but it is not always on screen to give: the
+  // roster follows the date picker, so in any other month the picked day is
+  // the thing they just chose and the honest place to open.
+  useEffect(() => {
+    const el = wrapRef.current;
+    if (!el) return;
+    // A new month is a new question, so it re-centres even if they scrolled
+    // the last one. Within a month their scroll position is theirs.
+    touched.current = false;
+    const go = (): void => {
+      if (touched.current) return;
+      const target =
+        el.querySelector<HTMLElement>("thead th.day.today") ??
+        el.querySelector<HTMLElement>("thead th.day.sel");
+      if (!target) return;
+      // The engineer column is sticky, so it covers the left of the scroller;
+      // anything parked under it is parked out of sight.
+      const nameWidth = el.querySelector<HTMLElement>("thead th.lab")?.offsetWidth ?? 0;
+      const inset = Math.round((el.clientWidth - nameWidth) * 0.25);
+      const delta = target.getBoundingClientRect().left - el.getBoundingClientRect().left;
+      el.scrollLeft = Math.max(0, el.scrollLeft + delta - nameWidth - inset);
+    };
+    go();
+    // Once more after the grid has settled: on the first paint the columns
+    // have not been laid out yet and every offset reads zero.
+    const t = window.setTimeout(go, 120);
+    return () => window.clearTimeout(t);
+  }, [monthIso, selectedIso]);
+
   return (
     <>
-      <div className="rosterbar">
-        <span className="scope">
-          <b>{scope}</b> · {rows.length}
-          {rows.length === grid.length ? "" : ` of ${grid.length}`} engineers
-        </span>
-        <input
-          className="rosterq"
-          type="search"
-          placeholder="Search an engineer or team"
-          aria-label="Search an engineer or team"
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-        />
+      <div className="card-head">
+        <div className="seg teamseg" role="tablist" aria-label="Show CRE or SRE">
+          {(["CRE", "SRE"] as const).map((f) => (
+            <button
+              key={f}
+              role="tab"
+              aria-selected={family === f}
+              className={family === f ? "on" : ""}
+              onClick={() => onFamilyChange(f)}
+            >
+              {f}
+            </button>
+          ))}
+        </div>
+
+        <h2>
+          Roster <span className="count">{rows.length}</span>
+        </h2>
+
+        <div className="tools">
+          <label className="rq">
+            <svg
+              width="14"
+              height="14"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              aria-hidden="true"
+            >
+              <circle cx="11" cy="11" r="7" />
+              <path d="M20 20l-3.5-3.5" />
+            </svg>
+            <input
+              type="search"
+              placeholder="Find an engineer"
+              autoComplete="off"
+              aria-label="Find an engineer"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+            />
+            {query ? (
+              <button type="button" className="rqx" aria-label="Clear" onClick={() => setQuery("")}>
+                &times;
+              </button>
+            ) : null}
+          </label>
+
+          <select
+            className="teampick"
+            aria-label="Show one team"
+            value={teamKey}
+            onChange={(e) => onTeamKeyChange(e.target.value)}
+          >
+            <option value="">All teams</option>
+            {teams.map((t) => (
+              <option key={t} value={t}>
+                {t.charAt(0).toUpperCase() + t.slice(1)}
+              </option>
+            ))}
+          </select>
+
+          <label className="rotonly" title="Fade leave and allocations">
+            <input
+              type="checkbox"
+              checked={rotationsOnly}
+              onChange={(e) => setRotationsOnly(e.target.checked)}
+            />
+            Rotations only
+          </label>
+        </div>
       </div>
 
-      <div className="twwrap">
+      {/* The card's one scroller. Both axes live here, which is what lets the
+          date row and the engineer column stay pinned to the grid they label
+          instead of to the page. */}
+      <div className="twwrap rostwrap" ref={wrapRef} onScroll={() => (touched.current = true)}>
         <table className="tw roster">
           <thead>
             <tr>
@@ -158,9 +296,12 @@ export default function MonthRoster({
                 return (
                   <th
                     key={iso}
-                    className={`${weekend ? "wknd" : ""} ${iso === todayIso ? "today" : ""}`}
+                    className={`day ${weekend ? "wknd" : ""} ${iso === todayIso ? "today" : ""} ${
+                      iso === selectedIso ? "sel" : ""
+                    }`}
+                    aria-current={iso === selectedIso ? "date" : undefined}
                   >
-                    {d.getDate()}
+                    <span className="d">{d.getDate()}</span>
                   </th>
                 );
               })}
@@ -185,7 +326,9 @@ export default function MonthRoster({
                   return (
                     <td
                       key={iso}
-                      className={`${weekend ? "wknd" : ""} ${iso === todayIso ? "today" : ""}`}
+                      className={`${weekend ? "wknd" : ""} ${iso === todayIso ? "today" : ""} ${
+                        iso === selectedIso ? "sel" : ""
+                      } ${rotationsOnly && cell && !cell.isRotation ? "muted" : ""}`}
                       title={cell ? `${row.name} · ${cell.title}` : undefined}
                     >
                       {cell ? (

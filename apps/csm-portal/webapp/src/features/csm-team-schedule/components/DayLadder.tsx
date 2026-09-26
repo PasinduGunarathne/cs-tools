@@ -47,7 +47,7 @@ const HOUR_PX = 38;
  * tag: inside a zone lane the avatar colour already says which team someone is
  * on, and the full name and team stay on the row's tooltip.
  */
-const MIN_COLUMN_PX = 166;
+const MIN_COLUMN_PX = 148;
 
 const px = (minutes: number): number => Math.round((minutes / 60) * HOUR_PX);
 
@@ -82,6 +82,13 @@ interface DayLadderProps {
   zones: ScheduleZone[];
   absences: ScheduleAbsence[];
   absenceKinds: ScheduleAbsenceKind[];
+  /** The page's own group and team state. Rendered here as well as in the
+   *  toolbar -- one control in two places, as the prototype has it. */
+  family: "CRE" | "SRE";
+  onFamilyChange: (family: "CRE" | "SRE") => void;
+  teamKey: string;
+  onTeamKeyChange: (teamKey: string) => void;
+  teams: string[];
 }
 
 interface BlockRow {
@@ -148,6 +155,11 @@ export default function DayLadder({
   absenceKinds,
   tz,
   zoneLabel,
+  family,
+  onFamilyChange,
+  teamKey,
+  onTeamKeyChange,
+  teams,
 }: DayLadderProps): JSX.Element {
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const touched = useRef(false);
@@ -260,14 +272,65 @@ export default function DayLadder({
     () =>
       56 +
       built.reduce((sum, lane) => sum + Math.max(1, lane.columns.length) * MIN_COLUMN_PX + 12, 0) +
-      250,
+      240,
     [built],
   );
 
   const hours: number[] = [];
   for (let h = 0; h <= 24; h += 2) hours.push(h);
 
+  /** Distinct people on the rota today, not cards: one engineer holding an
+   *  escalation tier and an ordinary window is one engineer. */
+  const headcount = useMemo(
+    () => new Set(lanes.flatMap((l) => l.assignments.map((a) => a.engineer.userId))).size,
+    [lanes],
+  );
+
   return (
+    <>
+      {/* The card's own head, as the prototype has it: which group you are
+          looking at, and which team within it, stated where the day is read
+          rather than only in the page toolbar above. */}
+      <div className="card-head">
+        <div className="seg teamseg" role="tablist" aria-label="Show CRE or SRE">
+          {(["CRE", "SRE"] as const).map((f) => (
+            <button
+              key={f}
+              role="tab"
+              aria-selected={family === f}
+              className={family === f ? "on" : ""}
+              onClick={() => onFamilyChange(f)}
+            >
+              {f}
+            </button>
+          ))}
+        </div>
+
+        <h2>
+          On the rota <span className="count">{headcount}</span>
+        </h2>
+
+        <div className="tools">
+          <span className="rng">
+            {dayLabel(day.toISOString(), tz)}
+            {day.getDay() === 0 || day.getDay() === 6 ? " · weekend" : ""}
+          </span>
+          <select
+            className="teampick"
+            aria-label="Show one team"
+            value={teamKey}
+            onChange={(e) => onTeamKeyChange(e.target.value)}
+          >
+            <option value="">All teams</option>
+            {teams.map((t) => (
+              <option key={t} value={t}>
+                {t.charAt(0).toUpperCase() + t.slice(1)}
+              </option>
+            ))}
+          </select>
+        </div>
+      </div>
+
     <div className="ladwrap" ref={wrapRef} onScroll={() => (touched.current = true)}>
       {/* Inside the scroller, not above it. Sitting outside, the headings kept
           their own horizontal position while the lanes moved under them, so
@@ -359,6 +422,7 @@ export default function DayLadder({
         </div>
       </div>
     </div>
+    </>
   );
 }
 
@@ -483,7 +547,12 @@ function NameRow({
    *  every row would be noise. */
   hideTag?: boolean;
 }): JSX.Element {
-  const tag = assignment.tier ?? (assignment.isOnCall ? "OC" : assignment.teamKey);
+  /* Only what the row does not already say. A tier ("L2") and on-call status
+     are not readable anywhere else on the card; the team is -- it is the
+     avatar's colour, and the row's own tooltip. Spelling it out a third time
+     cost about a quarter of the width the name needed, so the name was the
+     thing that got cut. */
+  const tag = assignment.tier ?? (assignment.isOnCall ? "OC" : null);
   return (
     <span className="lnm" title={`${assignment.engineer.name} · ${assignment.teamKey}`}>
       <span className="av" style={{ background: teamColour(assignment.teamKey) }}>
@@ -491,7 +560,7 @@ function NameRow({
       </span>
       <span className="who">{assignment.engineer.name}</span>
       {assignment.engineer.isLead ? <i className="tag lead-t">Lead</i> : null}
-      {hideTag ? null : (
+      {hideTag || !tag ? null : (
         <i className={`tier-t${assignment.isOnCall ? " oc-t" : ""}`}>{tag}</i>
       )}
     </span>
