@@ -79,6 +79,19 @@ apply_pending_migrations() {
     printf "\nINSERT INTO schema_migrations (version) VALUES ('%s');\n" "$version" >> "$tmp"
     $PSQL -d "$db" -1 -f "$tmp"
     rm -f "$tmp"
+
+    # A fixture named for this migration runs straight after it, in the same
+    # pass. Some migrations backfill rows that only ServiceNow supplies and
+    # RAISE EXCEPTION when they are absent -- fatal on a fresh local database,
+    # and fatal for every migration queued behind them. A fixture supplies
+    # those rows at the moment they first become insertable, so the real
+    # migration runs unmodified. Local dev only; nothing reads /migrations/
+    # fixtures outside this compose stack.
+    fixture="/migrations/fixtures/${version}.sql"
+    if [ -f "$fixture" ]; then
+      echo "[migrate]     + fixture ${version}.sql"
+      $PSQL -d "$db" -1 -f "$fixture"
+    fi
   done
 }
 
@@ -90,5 +103,12 @@ apply_pending_migrations "${SRE_ALERT_DB_NAME}" /migrations/sre-alert-ingestion-
 
 echo "[migrate] loading entity-service seed data"
 $PSQL -d "${ENTITY_DB_NAME}" -f /migrations/seed-entity-service.sql
+
+# The Team Schedule roster: teams, engineers and a rota either side of today.
+# Separate from the base seed because it is the only seed that depends on the
+# schedule_* tables, and because it is the one a developer is likely to want to
+# re-run on its own while working on the rota.
+echo "[migrate] loading Team Schedule roster"
+$PSQL -d "${ENTITY_DB_NAME}" -f /migrations/seed-team-schedule.sql
 
 echo "[migrate] done"
