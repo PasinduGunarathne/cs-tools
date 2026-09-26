@@ -141,6 +141,20 @@ export default function CsmTeamSchedulePage(): JSX.Element {
     return ownGroup || t === "today";
   };
 
+  /**
+   * Which tabs are on the strip at all.
+   *
+   * Disabling and removing answer different situations. An engineer looking at
+   * the other group sees the tab greyed, because toggling back brings it
+   * straight back -- removing it would make the strip change shape under them.
+   * A manager has no such toggle: they hold no rota on either group, so My week
+   * can never apply to them, and a permanently dead tab is just something to
+   * wonder about. It is not offered.
+   */
+  const visibleTabs: ViewTab[] = (["mine", "today", "week", "roster"] as ViewTab[]).filter(
+    (t) => !(isManager && t === "mine"),
+  );
+
   /** The tab actually being shown.
    *
    *  Derived, not corrected after the fact: switching group while on My week
@@ -287,7 +301,7 @@ export default function CsmTeamSchedulePage(): JSX.Element {
 
         <div className="tabrow">
           <div className="tabs" role="tablist">
-            {(["mine", "today", "week", "roster"] as ViewTab[]).map((t) => {
+            {visibleTabs.map((t) => {
               const off = !appliesToView(t);
               return (
               <button
