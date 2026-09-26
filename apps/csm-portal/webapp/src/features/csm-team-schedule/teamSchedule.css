@@ -538,3 +538,404 @@
 .csm-ts .ladder .lncols.one .lnm .lead-t {
   padding: 0 4px;
 }
+
+/* ── Your next rotation ──────────────────────────────────────────────────
+   A line about the reader, above the card rather than inside it, because the
+   answer must not change when they click across to another view. */
+.csm-ts .nextrot {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin: 0 0 12px;
+  padding: 9px 14px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--accent);
+  border-radius: 10px;
+  background: var(--surface);
+  font-size: 12.5px;
+}
+
+/* On now is a different statement from "coming up", so it gets the live
+   colour the ladder already uses for the current hour. */
+.csm-ts .nextrot.now {
+  border-left-color: var(--now);
+  background: color-mix(in srgb, var(--now) 6%, var(--surface));
+}
+
+.csm-ts .nextrot .nrlab {
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.csm-ts .nextrot.now .nrlab {
+  color: var(--now);
+}
+
+.csm-ts .nextrot .nrwhat {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.csm-ts .nextrot .nrwhat b {
+  font-weight: 700;
+  color: var(--ink);
+}
+
+.csm-ts .nextrot .nrtier {
+  font-style: normal;
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  border: 1px solid var(--line-2);
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+
+.csm-ts .nextrot .nrtier.oc {
+  color: var(--oc-fg);
+  background: var(--oc-bg);
+  border-color: color-mix(in srgb, var(--oc-fg) 40%, var(--line-2));
+}
+
+.csm-ts .nextrot .nrwhen {
+  color: var(--ink-2);
+}
+
+/* The relative word sits last and quietly: "Tue, 30 Sept" is the fact, "in 4
+   days" is only the arithmetic a reader would otherwise do themselves. */
+.csm-ts .nextrot .nrin {
+  margin-left: auto;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--accent-ink);
+}
+
+.csm-ts .nextrot .nrmuted {
+  color: var(--muted);
+}
+
+/* ── Your own row in the month roster ────────────────────────────────────
+   The same treatment today's column gets, for the same reason: a grid of a
+   hundred engineers is unreadable until you can find yourself in it. */
+.csm-ts .tw.roster tbody tr.me > th.lab {
+  background: var(--accent-soft-2);
+  box-shadow: inset 3px 0 0 var(--accent), 1px 0 0 var(--line);
+  font-weight: 600;
+}
+
+.csm-ts .tw.roster tbody tr.me > td {
+  background: var(--accent-soft-2);
+}
+
+/* Where the reader's row meets today's column -- the cell that answers "am I
+   on right now" -- is the one place both marks apply, so it takes the
+   stronger of the two rather than letting them cancel out. */
+.csm-ts .tw.roster tbody tr.me > td.today {
+  background: var(--accent-soft);
+}
+
+/* ── SRE month roster: a day split by zone ───────────────────────────────
+   Three sub-columns on a weekday, two at a weekend, because the catalogue has
+   no weekend TZ3 window to roster anyone into. The header becomes two rows,
+   so the second one has to stick below the first rather than on top of it. */
+.csm-ts .tw.roster.split thead tr:first-child th {
+  top: 0;
+  height: 26px;
+}
+
+.csm-ts .tw.roster.split thead tr.zrow th {
+  top: 26px;
+  height: 18px;
+  padding: 0;
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: var(--muted);
+  background: var(--surface-solid);
+  border-bottom: 1px solid var(--line-2);
+  z-index: 2;
+}
+
+/* Where the two sticky axes cross, the engineer column still wins. */
+.csm-ts .tw.roster.split thead tr.zrow th.lab {
+  z-index: 4;
+}
+
+.csm-ts .tw.roster.split td.c.z,
+.csm-ts .tw.roster.split thead tr.zrow th.zc {
+  min-width: 30px;
+  width: 30px;
+  padding: 2px 1px;
+}
+
+/* The boundary between one day and the next has to read more strongly than
+   the boundary between two zones inside a day, or thirty-one days become one
+   undifferentiated field of cells. */
+.csm-ts .tw.roster.split td.c.zfirst,
+.csm-ts .tw.roster.split thead tr.zrow th.zc.zfirst,
+.csm-ts .tw.roster.split thead tr:first-child th.day {
+  border-left: 2px solid var(--line-2);
+}
+
+.csm-ts .tw.roster.split td.c.z .chip {
+  min-width: 0;
+  width: 100%;
+  padding: 0;
+  font-size: 9px;
+  justify-content: center;
+}
+
+/* A zone nobody is rostered into: a rule, not a dot, so an empty sub-column
+   reads as "no cover here" rather than as a missing cell. */
+.csm-ts .tw.roster.split .zempty {
+  display: block;
+  width: 6px;
+  height: 1px;
+  margin: 0 auto;
+  background: var(--line-2);
+  opacity: 0.7;
+}
+
+/* Leave spans the whole day: being away is not a fact about one zone. */
+.csm-ts .tw.roster.split td.c.zwhole .chip {
+  width: 100%;
+  justify-content: center;
+}
+
+/* A tab that does not apply to the group on screen. Shown rather than removed:
+   a strip that loses an item when you toggle CRE/SRE makes the reader wonder
+   what else moved. The tooltip says why. */
+.csm-ts .tab.off {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.csm-ts .tab.off:hover {
+  background: transparent;
+}
+
+/* The day the single chevrons are on, beside the period the double ones move.
+   Quieter than the period -- it is the cursor, not the heading. */
+.csm-ts .monthnav .lbl .on {
+  font-style: normal;
+  margin-left: 7px;
+  padding-left: 8px;
+  border-left: 1px solid var(--line-2);
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--accent-ink);
+}
+
+/* Your own row, marked as firmly as today's column is.
+   Today gets a tinted column plus a filled circle on the date; this gets a
+   tinted row, a bar down the left edge, and a tag on the name -- so it is
+   findable both by scanning down the grid and by scanning across it. */
+.csm-ts .tw.roster tbody tr.me > th.lab .youtag {
+  font-style: normal;
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 9.5px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  flex: none;
+}
+
+/* Where your row crosses today's column is the cell that answers "am I on
+   right now", so it takes the strongest tint of the three. */
+.csm-ts .tw.roster tbody tr.me > td.today {
+  background: var(--accent-soft);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+
+/* Rotations-only must not fade your own row into the background -- it is the
+   one row you came to find. */
+.csm-ts .tw.roster tbody tr.me > td.muted .chip {
+  opacity: 0.55;
+  filter: none;
+}
+
+/* ── This week: teams in the cell, names on hover ────────────────────────
+   Seven columns of names is a wall of text. The teams are what a reader scans
+   for; the names are what they want once they have found the team. */
+.csm-ts .tw .teamcell {
+  position: relative;
+}
+
+.csm-ts .tw .teamcell .tl {
+  padding: 1px 4px;
+  margin: 0 -4px;
+  border-radius: 5px;
+  cursor: default;
+}
+
+.csm-ts .tw .teamcell .tl.on,
+.csm-ts .tw .teamcell .tl:hover {
+  background: var(--accent-soft-2);
+  color: var(--ink);
+}
+
+.csm-ts .tw .teamcell .tl:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 0;
+}
+
+/* Anchored to the cell rather than sitting beside it: a week cell is one of
+   seven columns and has no room to its side. It overlays its neighbours,
+   which is the point -- it is transient. */
+.csm-ts .tw .teamcell .tlpop {
+  position: absolute;
+  top: 100%;
+  left: -6px;
+  z-index: 20;
+  min-width: 190px;
+  max-width: 260px;
+  margin-top: 3px;
+  padding: 8px 10px;
+  border: 1px solid var(--line-2);
+  border-radius: 9px;
+  /* Opaque: it sits over other cells, which must not read through it. */
+  background: var(--surface-solid);
+  box-shadow: 0 8px 22px rgb(16 23 34 / 18%);
+  pointer-events: none;
+}
+
+/* Near the right edge the popover would leave the scroller, so the last two
+   columns open theirs to the left instead. */
+.csm-ts .tw tbody td:nth-last-child(-n + 2) .teamcell .tlpop {
+  left: auto;
+  right: -6px;
+}
+
+.csm-ts .tw .teamcell .tlph {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-bottom: 6px;
+  padding-bottom: 5px;
+  border-bottom: 1px solid var(--line);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.csm-ts .tw .teamcell .tlph i {
+  width: 3px;
+  height: 12px;
+  border-radius: 2px;
+  flex: none;
+}
+
+.csm-ts .tw .teamcell .tlph b {
+  margin-left: auto;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+
+.csm-ts .tw .teamcell .tlpop .nm {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 2px 0;
+  font-size: 12.5px;
+  white-space: nowrap;
+}
+
+.csm-ts .tw .teamcell .tlpop .nm .who {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ══ Month roster: three marks, three jobs ══════════════════════════════
+   Today is a fact about the calendar. The selected day is a choice by the
+   reader. Your row is a fact about the reader. All three were drawn in the
+   accent -- and `--today` and `--accent` are literally the same hex -- so a
+   row and a column became indistinguishable, and their crossing meant
+   nothing.
+
+   They are separated by SHAPE rather than by hue, because hue alone fails for
+   anyone who cannot rely on it, and because the axes differ anyway: a column
+   is edged, a row is filled. Equal prominence, no ambiguity. */
+
+/* ── Today: a column, edged ─────────────────────────────────────────────
+   Rules down both sides so it reads as one continuous column across thirty
+   rows rather than as a stack of separately tinted cells. */
+.csm-ts .tw.roster tbody td.today,
+.csm-ts .tw.roster thead th.today {
+  background: color-mix(in srgb, var(--today) 7%, transparent);
+  box-shadow: inset 1px 0 0 var(--today), inset -1px 0 0 var(--today);
+}
+
+.csm-ts .tw.roster tbody tr:last-child td.today {
+  box-shadow: inset 1px 0 0 var(--today), inset -1px 0 0 var(--today),
+    inset 0 -2px 0 var(--today);
+}
+
+/* A split day is several sub-columns, so only the outer edges are drawn --
+   otherwise today grows three rings instead of one. */
+.csm-ts .tw.roster.split tbody td.today {
+  box-shadow: none;
+  background: color-mix(in srgb, var(--today) 7%, transparent);
+}
+
+.csm-ts .tw.roster.split tbody td.today.zfirst {
+  box-shadow: inset 2px 0 0 var(--today);
+}
+
+/* ── Your row: filled, and barred at the start ──────────────────────────── */
+.csm-ts .tw.roster tbody tr.me > th.lab,
+.csm-ts .tw.roster tbody tr.me > td {
+  background: var(--accent-soft-2);
+}
+
+.csm-ts .tw.roster tbody tr.me > th.lab {
+  box-shadow: inset 3px 0 0 var(--accent), 1px 0 0 var(--line);
+  font-weight: 600;
+}
+
+/* ── Where they cross ───────────────────────────────────────────────────
+   Both marks are true of this one cell -- "am I on, right now" -- so it takes
+   the row's fill at full strength and keeps the column's edges. */
+.csm-ts .tw.roster tbody tr.me > td.today {
+  background: var(--accent-soft);
+}
+
+/* ── Scanning aids ──────────────────────────────────────────────────────── */
+
+/* Ninety-three columns is a long way to track a row by eye. Hovering lights
+   the whole row, which is the cheapest possible fix and the one a spreadsheet
+   would give you. */
+.csm-ts .tw.roster tbody tr:hover > td,
+.csm-ts .tw.roster tbody tr:hover > th.lab {
+  background: var(--surface-2);
+}
+
+.csm-ts .tw.roster tbody tr.me:hover > td,
+.csm-ts .tw.roster tbody tr.me:hover > th.lab {
+  background: var(--accent-soft);
+}
+
+/* A rule where the team changes. Rows are already grouped by team; this is
+   what makes the grouping visible. */
+.csm-ts .tw.roster tbody tr.teamtop > th.lab,
+.csm-ts .tw.roster tbody tr.teamtop > td {
+  border-top: 2px solid var(--line-2);
+}
+
+/* Mondays, so a month has a rhythm to count by instead of thirty-one
+   identical columns. Quieter than either mark above -- it is a gridline. */
+.csm-ts .tw.roster tbody td.wkstart,
+.csm-ts .tw.roster thead th.wkstart {
+  border-left: 1px solid var(--line-2);
+}

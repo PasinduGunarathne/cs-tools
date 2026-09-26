@@ -51,6 +51,12 @@ interface MonthRosterProps {
   teamKey: string;
   onTeamKeyChange: (teamKey: string) => void;
   teams: string[];
+  /** CRE and SRE in the order they should read -- the reader's own group
+   *  first, because the first of a pair reads as the default. */
+  families: readonly ("CRE" | "SRE")[];
+  /** The signed-in reader, so their own row can be marked and brought into
+   *  view. A month of a hundred-odd engineers is a haystack otherwise. */
+  meEmail?: string;
 }
 
 interface Cell {
@@ -82,6 +88,8 @@ export default function MonthRoster({
   teamKey,
   onTeamKeyChange,
   teams,
+  families,
+  meEmail,
 }: MonthRosterProps): JSX.Element {
   const [query, setQuery] = useState("");
   /** Fade everything that is not a turn on the rota.
@@ -91,7 +99,9 @@ export default function MonthRoster({
    *  on next Tuesday" is a hard question to read off the grid. This does not
    *  filter -- the cells stay where they are, so the shape of the month does
    *  not change under the reader; they simply stop competing. */
-  const [rotationsOnly, setRotationsOnly] = useState(false);
+  //  On by default: the grid is opened to find the rota in the routine, so it
+  //  should answer that question before anything is clicked.
+  const [rotationsOnly, setRotationsOnly] = useState(true);
 
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const touched = useRef(false);
@@ -102,6 +112,34 @@ export default function MonthRoster({
     return Array.from({ length: count }, (_, i) => new Date(first.getFullYear(), first.getMonth(), i + 1));
   }, [month]);
 
+  /** The zones SRE actually staffs, per kind of day.
+   *
+   *  Not a constant: the catalogue is what knows this. Its weekday windows
+   *  cover TZ1, TZ2 and TZ3; its weekend windows are TZ1 and TZ2 only, and
+   *  there is no weekend TZ3 shift to assign anyone to. Reading it from the
+   *  shifts means a rota change lands here without a code change, and a
+   *  column can never appear that nobody can be rostered into. */
+  const zoneColumns = useMemo(() => {
+    const pick = (scope: "WEEKDAY" | "WEEKEND"): string[] => {
+      const codes = new Set<string>();
+      for (const sh of shifts.values()) {
+        if (sh.family !== "SRE" || !sh.zoneCode) continue;
+        if (sh.dayScope === scope || sh.dayScope === "ANY") codes.add(sh.zoneCode);
+      }
+      return [...codes].sort();
+    };
+    return { weekday: pick("WEEKDAY"), weekend: pick("WEEKEND") };
+  }, [shifts]);
+
+  /** Only SRE splits a day by zone -- CRE has no zones at all, and a day with
+   *  no staffed zone at all is not split either: colSpan={0} means "span every
+   *  remaining column" in HTML, not "span nothing", so an empty list would
+   *  silently swallow the rest of the month. */
+  const split =
+    family === "SRE" && zoneColumns.weekday.length > 0 && zoneColumns.weekend.length > 0;
+  const zonesOn = (weekend: boolean): string[] =>
+    weekend ? zoneColumns.weekend : zoneColumns.weekday;
+
   const kindByCode = useMemo(
     () => new Map(absenceKinds.map((k) => [k.code, k])),
     [absenceKinds],
@@ -111,13 +149,21 @@ export default function MonthRoster({
   const grid = useMemo(() => {
     const people = new Map<
       string,
-      { name: string; teamKey: string; days: Map<string, Cell> }
+      {
+        name: string;
+        email: string;
+        teamKey: string;
+        /** Whole-day facts: an absence, or a window that belongs to no zone. */
+        days: Map<string, Cell>;
+        /** Zoned facts, keyed `${iso}|${zoneCode}` -- one per sub-column. */
+        zoned: Map<string, Cell>;
+      }
     >();
 
-    const seat = (userId: string, name: string, teamKey: string) => {
+    const seat = (userId: string, name: string, email: string, teamKey: string) => {
       let row = people.get(userId);
       if (!row) {
-        row = { name, teamKey, days: new Map() };
+        row = { name, email, teamKey, days: new Map(), zoned: new Map() };
         people.set(userId, row);
       }
       return row;
@@ -125,7 +171,7 @@ export default function MonthRoster({
 
     for (const a of assignments) {
       const shift = shifts.get(a.shiftCode);
-      const row = seat(a.engineer.userId, a.engineer.name, a.teamKey);
+      const row = seat(a.engineer.userId, a.engineer.name, a.engineer.email, a.teamKey);
       const existing = row.days.get(a.rotaDate);
       // A tier beats the plain window it sits in: "L1" says more than "TZ1".
       const code = a.tier ?? shift?.shortCode ?? a.shiftCode;
@@ -134,16 +180,25 @@ export default function MonthRoster({
       // shift we still hold that code on the assignment, so fall back to it
       // rather than calling a real rota turn something else.
       const isRotation = shift ? isRotationShift(shift) : !a.shiftCode.includes("REGULAR");
-      if (!existing || a.tier) {
-        row.days.set(a.rotaDate, { code, token, title: shift?.label ?? a.shiftCode, isRotation });
+      const made: Cell = { code, token, title: shift?.label ?? a.shiftCode, isRotation };
+
+      // A zoned window lands in its own sub-column; anything else is a fact
+      // about the whole day and spans them.
+      const zone = a.zoneCode ?? shift?.zoneCode;
+      if (zone) {
+        const key = `${a.rotaDate}|${zone}`;
+        const held = row.zoned.get(key);
+        if (!held || a.tier) row.zoned.set(key, made);
+        continue;
       }
+      if (!existing || a.tier) row.days.set(a.rotaDate, made);
     }
 
     // Absences win: someone on leave is not on the rota that day, whatever a
     // generated row says.
     for (const ab of absences) {
       const kind = kindByCode.get(ab.kindCode);
-      const row = seat(ab.engineer.userId, ab.engineer.name, ab.teamKey);
+      const row = seat(ab.engineer.userId, ab.engineer.name, ab.engineer.email, ab.teamKey);
       const end = ab.endsOn ?? toIsoDate(days[days.length - 1]);
       for (const d of days) {
         const iso = toIsoDate(d);
@@ -158,10 +213,22 @@ export default function MonthRoster({
       }
     }
 
+    // Rota order, not alphabetical: the ABTs first, in the order the rota
+    // itself runs them, and the teams that hold no ABT rotation -- Americas,
+    // Migration -- after. Sorting by name put Americas above Atlas, which is
+    // backwards for a reader scanning for their own ABT.
+    const rank = new Map(teams.map((t, i) => [t, i]));
+    const orderOf = (k: string) => rank.get(k) ?? Number.MAX_SAFE_INTEGER;
+
     return [...people.entries()]
       .map(([userId, row]) => ({ userId, ...row }))
-      .sort((a, b) => a.teamKey.localeCompare(b.teamKey) || a.name.localeCompare(b.name));
-  }, [absences, assignments, days, kindByCode, shifts]);
+      .sort(
+        (a, b) =>
+          orderOf(a.teamKey) - orderOf(b.teamKey) ||
+          a.teamKey.localeCompare(b.teamKey) ||
+          a.name.localeCompare(b.name),
+      );
+  }, [absences, assignments, days, kindByCode, shifts, teams]);
 
   const q = query.trim().toLowerCase();
   const rows = q
@@ -169,6 +236,22 @@ export default function MonthRoster({
     : grid;
 
   const todayIso = toIsoDate(new Date());
+  const me = meEmail?.trim().toLowerCase() ?? "";
+
+  const meRow = useRef<HTMLTableRowElement | null>(null);
+  const scrolled = useRef(false);
+  useEffect(() => {
+    // Once, on open. Doing it on every render would yank the grid back every
+    // time the reader scrolled away to look at someone else.
+    if (scrolled.current || !meRow.current) return;
+    scrolled.current = true;
+    meRow.current.scrollIntoView({ block: "center", behavior: "auto" });
+  });
+  // A new search, group or month is a new question, so the next match earns
+  // being scrolled to again.
+  useEffect(() => {
+    scrolled.current = false;
+  }, [query, teamKey, family, month]);
 
   /** The month as a stable key: the Date itself is a fresh object each render. */
   const monthIso = toIsoDate(days[0]);
@@ -210,7 +293,7 @@ export default function MonthRoster({
     <>
       <div className="card-head">
         <div className="seg teamseg" role="tablist" aria-label="Show CRE or SRE">
-          {(["CRE", "SRE"] as const).map((f) => (
+          {families.map((f) => (
             <button
               key={f}
               role="tab"
@@ -286,7 +369,7 @@ export default function MonthRoster({
           date row and the engineer column stay pinned to the grid they label
           instead of to the page. */}
       <div className="twwrap rostwrap" ref={wrapRef} onScroll={() => (touched.current = true)}>
-        <table className="tw roster">
+        <table className={`tw roster${split ? " split" : ""}`}>
           <thead>
             <tr>
               <th className="lab">Engineer</th>
@@ -296,9 +379,10 @@ export default function MonthRoster({
                 return (
                   <th
                     key={iso}
+                    colSpan={split ? zonesOn(weekend).length : undefined}
                     className={`day ${weekend ? "wknd" : ""} ${iso === todayIso ? "today" : ""} ${
                       iso === selectedIso ? "sel" : ""
-                    }`}
+                    } ${d.getDay() === 1 ? "wkstart" : ""}`}
                     aria-current={iso === selectedIso ? "date" : undefined}
                   >
                     <span className="d">{d.getDate()}</span>
@@ -306,16 +390,54 @@ export default function MonthRoster({
                 );
               })}
             </tr>
+
+            {/* The zone row. A weekend has two columns rather than three
+                because there is no weekend TZ3 window to be rostered into --
+                the catalogue says so, and this follows it. */}
+            {split ? (
+              <tr className="zrow">
+                <th className="lab" aria-hidden="true" />
+                {days.map((d) => {
+                  const iso = toIsoDate(d);
+                  const weekend = d.getDay() === 0 || d.getDay() === 6;
+                  return zonesOn(weekend).map((z, i) => (
+                    <th
+                      key={`${iso}|${z}`}
+                      className={`zc ${i === 0 ? "zfirst" : ""} ${weekend ? "wknd" : ""}`}
+                      scope="col"
+                    >
+                      {z}
+                    </th>
+                  ));
+                })}
+              </tr>
+            ) : null}
           </thead>
           <tbody>
-            {rows.map((row) => (
-              <tr key={row.userId}>
+            {rows.map((row, i) => {
+              // The first row of each team earns a rule above it: sorted by team
+              // with nothing between them, a hundred and twenty rows read as one
+              // undifferentiated block.
+              const opensTeam = i > 0 && rows[i - 1].teamKey !== row.teamKey;
+              // Case-insensitive and trimmed: an identity provider is free to
+              // hand back Jane.Doe@Example.com for the address seeded as
+              // jane.doe@example.com, and an exact compare would silently
+              // never match.
+              const isMe = Boolean(me) && row.email.trim().toLowerCase() === me;
+              return (
+              <tr
+                key={row.userId}
+                ref={isMe ? meRow : undefined}
+                className={`${isMe ? "me" : ""}${opensTeam ? " teamtop" : ""}`.trim() || undefined}
+                aria-current={isMe ? "true" : undefined}
+              >
                 <th className="lab">
                   <span className="nm">
                     <span className="av" style={{ background: teamColour(row.teamKey) }}>
                       {initialsOf(row.name)}
                     </span>
                     <span className="who">{row.name}</span>
+                    {isMe ? <i className="youtag">You</i> : null}
                     <span className="team">{row.teamKey}</span>
                   </span>
                 </th>
@@ -323,24 +445,66 @@ export default function MonthRoster({
                   const iso = toIsoDate(d);
                   const cell = row.days.get(iso);
                   const weekend = d.getDay() === 0 || d.getDay() === 6;
-                  return (
-                    <td
-                      key={iso}
-                      className={`${weekend ? "wknd" : ""} ${iso === todayIso ? "today" : ""} ${
-                        iso === selectedIso ? "sel" : ""
-                      } ${rotationsOnly && cell && !cell.isRotation ? "muted" : ""}`}
-                      title={cell ? `${row.name} · ${cell.title}` : undefined}
-                    >
-                      {cell ? (
+                  const marks = `${weekend ? "wknd" : ""} ${iso === todayIso ? "today" : ""} ${
+                    iso === selectedIso ? "sel" : ""
+                  } ${d.getDay() === 1 ? "wkstart" : ""}`;
+                  const faded = (c: Cell | undefined) =>
+                    rotationsOnly && c && !c.isRotation ? "muted" : "";
+
+                  if (!split) {
+                    return (
+                      <td
+                        key={iso}
+                        className={`${marks} ${faded(cell)}`}
+                        title={cell ? `${row.name} · ${cell.title}` : undefined}
+                      >
+                        {cell ? (
+                          <span className={`chip sm ${cell.token}`}>{cell.code}</span>
+                        ) : (
+                          <span className="none">·</span>
+                        )}
+                      </td>
+                    );
+                  }
+
+                  const zones = zonesOn(weekend);
+
+                  // Leave belongs to the day, not to a zone: somebody away is
+                  // away from all of them, so it spans rather than picking one
+                  // arbitrarily.
+                  if (cell) {
+                    return (
+                      <td
+                        key={iso}
+                        colSpan={zones.length}
+                        className={`c zwhole ${marks} ${faded(cell)}`}
+                        title={`${row.name} · ${cell.title}`}
+                      >
                         <span className={`chip sm ${cell.token}`}>{cell.code}</span>
-                      ) : (
-                        <span className="none">·</span>
-                      )}
-                    </td>
-                  );
+                      </td>
+                    );
+                  }
+
+                  return zones.map((z, i) => {
+                    const zc = row.zoned.get(`${iso}|${z}`);
+                    return (
+                      <td
+                        key={`${iso}|${z}`}
+                        className={`c z ${i === 0 ? "zfirst" : ""} ${marks} ${faded(zc)}`}
+                        title={zc ? `${row.name} · ${z} · ${zc.title}` : undefined}
+                      >
+                        {zc ? (
+                          <span className={`chip sm ${zc.token}`}>{zc.code}</span>
+                        ) : (
+                          <span className="zempty" />
+                        )}
+                      </td>
+                    );
+                  });
                 })}
               </tr>
-            ))}
+              );
+            })}
           </tbody>
         </table>
       </div>

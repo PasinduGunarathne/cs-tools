@@ -89,6 +89,9 @@ interface DayLadderProps {
   teamKey: string;
   onTeamKeyChange: (teamKey: string) => void;
   teams: string[];
+  /** CRE and SRE in the order they should read -- the reader's own group
+   *  first, because the first of a pair reads as the default. */
+  families: readonly ("CRE" | "SRE")[];
 }
 
 interface BlockRow {
@@ -160,6 +163,7 @@ export default function DayLadder({
   teamKey,
   onTeamKeyChange,
   teams,
+  families,
 }: DayLadderProps): JSX.Element {
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const touched = useRef(false);
@@ -293,7 +297,7 @@ export default function DayLadder({
           rather than only in the page toolbar above. */}
       <div className="card-head">
         <div className="seg teamseg" role="tablist" aria-label="Show CRE or SRE">
-          {(["CRE", "SRE"] as const).map((f) => (
+          {families.map((f) => (
             <button
               key={f}
               role="tab"
@@ -576,9 +580,20 @@ function OffRotaStack({
   kinds: ScheduleAbsenceKind[];
 }): JSX.Element {
   const byKind = groupBy(absences, (a) => a.kindCode);
+
+  // Leave first, then allocations.
+  //
+  // Both take someone off the rota, but they answer different questions. Who
+  // is on leave is what a lead scans this column for -- it is the cover they
+  // may have to arrange today. An allocation is planned work someone is doing
+  // instead; useful to know, but it is not a gap. The catalogue's own order
+  // decides the rest, so two kinds in the same bucket keep their usual
+  // sequence.
+  const BUCKET_ORDER: Record<string, number> = { LEAVE: 0, ALLOCATION: 1, EXCLUDED: 2 };
   const cards = kinds
     .map((kind) => ({ kind, rows: byKind.get(kind.code) ?? [] }))
-    .filter((c) => c.rows.length > 0);
+    .filter((c) => c.rows.length > 0)
+    .sort((a, b) => (BUCKET_ORDER[a.kind.bucket] ?? 9) - (BUCKET_ORDER[b.kind.bucket] ?? 9));
 
   return (
     <div className="offstack">

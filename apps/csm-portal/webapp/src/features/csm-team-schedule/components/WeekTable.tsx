@@ -16,7 +16,7 @@
  * under the License.
  */
 
-import { useMemo, type JSX } from "react";
+import { useMemo, useState, type JSX } from "react";
 import type { ScheduleAssignment, ScheduleShift } from "../types";
 import { addDays, groupBy, initialsOf, shortDayName, toIsoDate } from "../utils/rota";
 import { teamColour } from "../utils/rotaHues";
@@ -33,6 +33,103 @@ interface WeekTableProps {
   teamKey: string;
   onTeamKeyChange: (teamKey: string) => void;
   teams: string[];
+  /** CRE and SRE in the order they should read -- the reader's own group
+   *  first, because the first of a pair reads as the default. */
+  families: readonly ("CRE" | "SRE")[];
+}
+
+/**
+ * A week cell, as teams rather than as a list of names.
+ *
+ * Seven columns of names is a wall of text -- the same complaint the day view
+ * had, and answered the same way: the teams are what a reader scans for, and
+ * the names are what they want once they have found the team. So the cell
+ * lists the teams with a count, and the names arrive on hover.
+ *
+ * A popover rather than the day view's side-by-side pane, because a week cell
+ * is one of seven columns and has no room beside it. It is anchored to the
+ * cell, which is why `.tw td` is positioned.
+ */
+function TeamCell({ rows }: { rows: ScheduleAssignment[] }): JSX.Element {
+  const byTeam = useMemo(
+    () => [...groupBy(rows, (r) => r.teamKey).entries()].sort((a, b) => a[0].localeCompare(b[0])),
+    [rows],
+  );
+  const [open, setOpen] = useState<string | null>(null);
+  const shown = byTeam.find(([team]) => team === open);
+
+  return (
+    <div className="teamcell" onMouseLeave={() => setOpen(null)}>
+      <div className="teamlist">
+        {byTeam.map(([team, teamRows]) => (
+          <span
+            key={team}
+            className={`tl${team === open ? " on" : ""}`}
+            tabIndex={0}
+            role="button"
+            aria-expanded={team === open}
+            onMouseEnter={() => setOpen(team)}
+            onFocus={() => setOpen(team)}
+            onBlur={() => setOpen(null)}
+            onClick={() => setOpen((t) => (t === team ? null : team))}
+          >
+            <i style={{ background: teamColour(team) }} />
+            <span className="tn">{team}</span>
+            <b>{teamRows.length}</b>
+          </span>
+        ))}
+      </div>
+
+      {shown ? (
+        <div className="tlpop" role="group" aria-label={`${shown[0]} engineers`}>
+          <div className="tlph">
+            <i style={{ background: teamColour(shown[0]) }} />
+            {shown[0]}
+            <b>{shown[1].length}</b>
+          </div>
+          {shown[1].map((a) => (
+            <span className="nm" key={a.id}>
+              <span className="av" style={{ background: teamColour(a.teamKey) }}>
+                {initialsOf(a.engineer.name)}
+              </span>
+              <span className="who">{a.engineer.name}</span>
+              {a.tier ? <i className="tier-t">{a.tier}</i> : null}
+              {a.isOnCall ? <i className="tier-t oc-t">OC</i> : null}
+            </span>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+/**
+ * How many engineers a cell can simply list before the names stop being
+ * readable and start being a wall. Six, because that is what the column fitted
+ * before -- so anything that already read fine is left alone.
+ */
+const NAMES_FIT = 6;
+
+/**
+ * Should this cell be grouped by team instead of listed by name?
+ *
+ * Grouping earns its place only when it actually collapses something. Two
+ * cases where it does not, and both are real here:
+ *
+ *   Americas night cover -- twelve engineers, all one team. The list would be
+ *   a single row hiding twelve names behind a hover, which is strictly worse
+ *   than reading them.
+ *
+ *   Evening 6-9pm -- seven engineers, one from each ABT. Seven rows each
+ *   hiding exactly one name: the same information, one hop further away.
+ *
+ * So the test is not "how many people" but "how much does grouping save": at
+ * least two names per team row, or it is not worth the hover.
+ */
+function groupsUsefully(rows: ScheduleAssignment[]): boolean {
+  if (rows.length <= NAMES_FIT) return false;
+  const teams = new Set(rows.map((r) => r.teamKey)).size;
+  return teams > 1 && rows.length / teams >= 2;
 }
 
 /** Minutes past the authoring midnight as HH:MM, wrapping past 24h. */
@@ -56,6 +153,7 @@ export default function WeekTable({
   teamKey,
   onTeamKeyChange,
   teams,
+  families,
 }: WeekTableProps): JSX.Element {
   const days = useMemo(() => Array.from({ length: 7 }, (_, i) => addDays(weekStart, i)), [weekStart]);
 
@@ -78,7 +176,7 @@ export default function WeekTable({
   const head = (
     <div className="card-head">
       <div className="seg teamseg" role="tablist" aria-label="Show CRE or SRE">
-        {(["CRE", "SRE"] as const).map((f) => (
+        {families.map((f) => (
           <button
             key={f}
             role="tab"
@@ -172,17 +270,32 @@ export default function WeekTable({
                     >
                       {cell.length === 0 ? (
                         <span className="none">—</span>
+                      ) : groupsUsefully(cell) ? (
+                        /* Regular hours: most of the team, spread across every
+                           ABT. Teams, with the names on hover. */
+                        <TeamCell rows={cell} />
                       ) : (
-                        cell.slice(0, 6).map((a) => (
+                        /* Few enough to simply read. A team list here would be
+                           an extra hop to reach three names that already fit. */
+                        cell.map((a) => (
+                          /* Name, and only the name.
+                             The team is the avatar's colour and the row's own
+                             tooltip, so spelling it out a third time was the
+                             widest thing in a narrow column. "OC" was worse
+                             than redundant -- the row it sits in is already
+                             labelled "Morning 6-9am on-call", so the badge
+                             restated the row heading against every name in it.
+                             The tier stays: L1/L2/L3 is the one thing here
+                             that nothing else says. */
                           <div className="nm" key={a.id} title={`${a.engineer.name} · ${a.teamKey}`}>
-                            <span className="av" style={{ background: teamColour(a.teamKey) }}>{initialsOf(a.engineer.name)}</span>
+                            <span className="av" style={{ background: teamColour(a.teamKey) }}>
+                              {initialsOf(a.engineer.name)}
+                            </span>
                             <span className="who">{a.engineer.name}</span>
                             {a.tier ? <span className="tier-t">{a.tier}</span> : null}
-                            <span className="team">{a.teamKey}</span>
                           </div>
                         ))
                       )}
-                      {cell.length > 6 ? <span className="lmore">+{cell.length - 6} more</span> : null}
                     </td>
                   );
                 })}

@@ -27,6 +27,7 @@ import {
 import DayLadder, { type LadderLane } from "../components/DayLadder";
 import MonthRoster from "../components/MonthRoster";
 import MyWeekStrip from "../components/MyWeekStrip";
+import NextRotation from "../components/NextRotation";
 import WeekTable from "../components/WeekTable";
 import type { ScheduleAssignment } from "../types";
 import { resolveDisplayTimeZone } from "@utils/dateTime";
@@ -43,6 +44,10 @@ const TEAMS: Record<Family, string[]> = {
   CRE: ["castor", "draco", "vega", "sirius", "atlas", "phoenix", "rigel", "americas", "migration"],
   SRE: ["apollo", "artemis"],
 };
+
+/** How far ahead to look for the reader's next rotation. Eight weeks covers
+ *  every rotation in the cycle without asking the API for a year of rows. */
+const NEXT_ROTATION_HORIZON_DAYS = 56;
 
 const TITLE: Record<ViewTab, string> = {
   mine: "My week",
@@ -75,7 +80,11 @@ const fmtShort = (d: Date): string =>
  */
 export default function CsmTeamSchedulePage(): JSX.Element {
   const [tab, setTab] = useState<ViewTab>("today");
-  const [family, setFamily] = useState<Family>("CRE");
+  /** null until the reader picks one, so their own group can be the default
+   *  once the profile arrives. Derived rather than corrected in an effect: an
+   *  SRE engineer must never render a frame on CRE, because the tab gating
+   *  would show them three disabled tabs on arrival. */
+  const [familyChoice, setFamilyChoice] = useState<Family | null>(null);
   const [teamKey, setTeamKey] = useState<string>("");
   const [anchor, setAnchor] = useState<Date>(() => new Date());
 
@@ -90,6 +99,47 @@ export default function CsmTeamSchedulePage(): JSX.Element {
   const tz = resolveDisplayTimeZone(user?.timeZone);
   const catalogue = useScheduleCatalogue();
 
+  /** The reader's own group, from their CSM profile. Absent for anyone who
+   *  belongs to no team -- a manager -- which is why it is optional rather
+   *  than defaulting to CRE. */
+  const myFamily: Family | undefined = useMemo(() => {
+    const f = user?.team?.family?.toUpperCase();
+    if (!f) return undefined;
+    return f.startsWith("SRE") ? "SRE" : "CRE";
+  }, [user?.team?.family]);
+
+  /** The group on screen: the reader's own until they choose otherwise.
+   *  CRE only as a last resort, for a manager who belongs to neither. */
+  const family: Family = familyChoice ?? myFamily ?? "CRE";
+
+  /** Their own group first in the segment. An SRE engineer reads "SRE | CRE",
+   *  because the first thing in a pair reads as the default, and theirs is. */
+  const families: Family[] =
+    myFamily === "SRE" ? ["SRE", "CRE"] : ["CRE", "SRE"];
+
+  /** Whether the group on screen is the reader's own.
+   *
+   *  Somebody on no team at all -- a manager -- is treated as at home in both,
+   *  because there is no "own group" for them to be outside of. */
+  const ownGroup = myFamily === undefined || myFamily === family;
+
+  /** Looking at the other group, only Today applies.
+   *
+   *  Today answers "who is covering right now", which is a fair question to
+   *  ask of the other group -- a CRE engineer escalating to SRE needs it. My
+   *  week is the reader's own rota, and they have none there. This week and
+   *  the month roster are planning views for a rota the reader is not part of
+   *  and cannot act on, so they are the other group's business, not theirs. */
+  const appliesToView = (t: ViewTab): boolean => ownGroup || t === "today";
+
+  /** The tab actually being shown.
+   *
+   *  Derived, not corrected after the fact: switching group while on My week
+   *  has to land somewhere the same render, or the reader sees one frame of an
+   *  empty strip before it rights itself. Their choice of tab is remembered,
+   *  so switching back to their own group returns them to My week. */
+  const view: ViewTab = appliesToView(tab) ? tab : "today";
+
   const weekStart = useMemo(() => mondayOf(anchor), [anchor]);
   /** The group/team controls the cards render in their own heads. It is the
    *  page's state either way -- the toolbar and the card head are two views of
@@ -97,16 +147,17 @@ export default function CsmTeamSchedulePage(): JSX.Element {
   const scopeControls = {
     family,
     onFamilyChange: (f: Family) => {
-      setFamily(f);
+      setFamilyChoice(f);
       setTeamKey("");
     },
     teamKey,
     onTeamKeyChange: setTeamKey,
     teams: TEAMS[family],
+    families,
   };
 
-  const dayView = tab === "today";
-  const rosterView = tab === "roster";
+  const dayView = view === "today";
+  const rosterView = view === "roster";
   const monthStart = useMemo(
     () => new Date(anchor.getFullYear(), anchor.getMonth(), 1),
     [anchor],
@@ -141,7 +192,20 @@ export default function CsmTeamSchedulePage(): JSX.Element {
   // portal knows them by.
   const mine = useScheduleAssignments(
     { from: toIsoDate(weekStart), to: toIsoDate(addDays(weekStart, 6)), userEmail: user?.email ?? "" },
-    tab === "mine" && Boolean(user?.email),
+    view === "mine" && Boolean(user?.email),
+  );
+
+  // When this engineer is next on a rotation. Its own query, deliberately:
+  // it looks forward from today rather than at whatever week the reader has
+  // navigated to, so the answer does not change as they page around.
+  const nextFrom = useMemo(() => new Date(), []);
+  const upcoming = useScheduleAssignments(
+    {
+      from: toIsoDate(nextFrom),
+      to: toIsoDate(addDays(nextFrom, NEXT_ROTATION_HORIZON_DAYS)),
+      userEmail: user?.email ?? "",
+    },
+    Boolean(user?.email),
   );
 
   // Off rota follows the CRE/SRE choice like everything else on the page.
@@ -161,13 +225,37 @@ export default function CsmTeamSchedulePage(): JSX.Element {
 
   // SRE works in time zones, so its day is a lane per zone. CRE runs on one
   // clock, so it gets one lane.
+  /** The zones SRE actually staffs on the day being viewed.
+   *
+   *  The catalogue's weekend windows are TZ1 and TZ2 only -- there is no
+   *  weekend TZ3 for anyone to be rostered into -- so a weekend earns two
+   *  lanes and a weekday three. Read from the shifts rather than written down
+   *  here, which is the same rule the month roster follows and from the same
+   *  place: a rota change lands in both without a code change, and a lane can
+   *  never appear that nobody could be working in.
+   *
+   *  Falling back to every zone if the catalogue yields none is deliberate --
+   *  an empty ladder would read as "nobody is on" rather than as a catalogue
+   *  that failed to load. */
+  const zonesOnDay = useMemo(() => {
+    const weekend = anchor.getDay() === 0 || anchor.getDay() === 6;
+    const scope = weekend ? "WEEKEND" : "WEEKDAY";
+    const staffed = new Set<string>();
+    for (const sh of shifts.values()) {
+      if (sh.family !== "SRE" || !sh.zoneCode) continue;
+      if (sh.dayScope === scope || sh.dayScope === "ANY") staffed.add(sh.zoneCode);
+    }
+    const kept = zones.filter((z) => staffed.has(z.code));
+    return kept.length > 0 ? kept : zones;
+  }, [anchor, shifts, zones]);
+
   const lanes: LadderLane[] = useMemo(() => {
     if (family === "CRE") {
       return [
         { name: "Rotations", sub: "on-call, the night and regular hours", colour: "var(--muted)", assignments: rows },
       ];
     }
-    return zones.map((z) => ({
+    return zonesOnDay.map((z) => ({
       name: z.code,
       sub: z.label,
       colour: zoneColour(z.code),
@@ -175,13 +263,13 @@ export default function CsmTeamSchedulePage(): JSX.Element {
       // Escalation on one side, everyone else in the zone on the other.
       layout: "zone" as const,
     }));
-  }, [family, rows, zones]);
+  }, [family, rows, zonesOnDay]);
 
   if (catalogue.isError) {
     return <QueryErrorState message="Could not load the schedule catalogue." error={catalogue.error} />;
   }
 
-  const busy = catalogue.isLoading || (tab === "mine" ? mine.isLoading : assignments.isLoading);
+  const busy = catalogue.isLoading || (view === "mine" ? mine.isLoading : assignments.isLoading);
 
   return (
     <div className="csm-ts" style={SCHEDULE_THEME_VARS}>
@@ -190,11 +278,20 @@ export default function CsmTeamSchedulePage(): JSX.Element {
 
         <div className="tabrow">
           <div className="tabs" role="tablist">
-            {(["mine", "today", "week", "roster"] as ViewTab[]).map((t) => (
+            {(["mine", "today", "week", "roster"] as ViewTab[]).map((t) => {
+              const off = !appliesToView(t);
+              return (
               <button
                 key={t}
-                className={`tab ${tab === t ? "on" : ""}`}
+                className={`tab ${view === t ? "on" : ""}${off ? " off" : ""}`}
                 role="tab"
+                disabled={off}
+                aria-disabled={off}
+                title={
+                  off
+                    ? `You are on ${myFamily}. Only “Who is working today” applies to ${family}.`
+                    : undefined
+                }
                 onClick={() => setTab(t)}
               >
                 <span className="tl">{TITLE[t]}</span>
@@ -206,7 +303,8 @@ export default function CsmTeamSchedulePage(): JSX.Element {
                       : `${fmtShort(weekStart)} – ${fmtShort(addDays(weekStart, 6))}`}
                 </span>
               </button>
-            ))}
+              );
+            })}
           </div>
 
           <div className="tabright">
@@ -217,8 +315,30 @@ export default function CsmTeamSchedulePage(): JSX.Element {
                   keep in step. The toolbar keeps what is genuinely about the
                   page rather than the card: which date you are on. */}
               <div className="monthnav">
-                <button onClick={() => setAnchor(stepBy(anchor, tab, -1))} title="Previous">
-                  &laquo;
+                {/* Two granularities, because a month roster needs both: the
+                    double chevron moves by whatever the view is about -- a
+                    week, a month -- and the single one always moves a day.
+                    Without the day step, picking out the 14th on the roster
+                    meant opening the calendar; without the period step,
+                    reaching next month meant thirty clicks.
+
+                    On the day view the two would do the same thing, so only
+                    one pair is shown. */}
+                {dayView ? null : (
+                  <button
+                    onClick={() => setAnchor(stepBy(anchor, view, -1))}
+                    title={rosterView ? "Previous month" : "Previous week"}
+                    aria-label={rosterView ? "Previous month" : "Previous week"}
+                  >
+                    &laquo;
+                  </button>
+                )}
+                <button
+                  onClick={() => setAnchor(addDays(anchor, -1))}
+                  title="Previous day"
+                  aria-label="Previous day"
+                >
+                  &lsaquo;
                 </button>
                 <span className="lbl">
                   <b>
@@ -228,10 +348,27 @@ export default function CsmTeamSchedulePage(): JSX.Element {
                         ? anchor.toLocaleDateString(undefined, { month: "long", year: "numeric" })
                         : `${fmtShort(weekStart)} – ${fmtShort(addDays(weekStart, 6))}`}
                   </b>
+                  {/* The day the single chevrons are moving. Without it, a day
+                      step inside the same week changes nothing on screen and
+                      the button reads as broken. */}
+                  {dayView ? null : <i className="on">{fmtShort(anchor)}</i>}
                 </span>
-                <button onClick={() => setAnchor(stepBy(anchor, tab, 1))} title="Next">
-                  &raquo;
+                <button
+                  onClick={() => setAnchor(addDays(anchor, 1))}
+                  title="Next day"
+                  aria-label="Next day"
+                >
+                  &rsaquo;
                 </button>
+                {dayView ? null : (
+                  <button
+                    onClick={() => setAnchor(stepBy(anchor, view, 1))}
+                    title={rosterView ? "Next month" : "Next week"}
+                    aria-label={rosterView ? "Next month" : "Next week"}
+                  >
+                    &raquo;
+                  </button>
+                )}
                 {/* Stepping a day at a time is fine for next week and hopeless
                     for next quarter, so the date is also directly selectable. */}
                 <label className="jump" title="Jump to a date">
@@ -271,12 +408,22 @@ export default function CsmTeamSchedulePage(): JSX.Element {
           </div>
         </div>
 
+        {/* Above the card, not in it: this answers a question about the reader,
+            so the answer must not change when they click to another view. */}
+        <NextRotation
+          mine={upcoming.data?.assignments ?? []}
+          shifts={shifts}
+          tz={tz}
+          horizonDays={NEXT_ROTATION_HORIZON_DAYS}
+          isLoading={upcoming.isLoading}
+        />
+
         <div className="card">
           {assignments.isError ? (
             <QueryErrorState message="Could not load the rota." error={assignments.error} />
           ) : busy ? (
             <div className="offnone">Loading the rota…</div>
-          ) : tab === "today" ? (
+          ) : view === "today" ? (
             <DayLadder
               day={anchor}
               tz={tz}
@@ -288,11 +435,12 @@ export default function CsmTeamSchedulePage(): JSX.Element {
               absenceKinds={catalogue.data?.absenceKinds ?? []}
               {...scopeControls}
             />
-          ) : tab === "week" ? (
+          ) : view === "week" ? (
             <WeekTable weekStart={weekStart} assignments={rows} shifts={shifts} {...scopeControls} />
-          ) : tab === "roster" ? (
+          ) : view === "roster" ? (
             <MonthRoster
               selectedIso={toIsoDate(anchor)}
+              meEmail={user?.email}
               month={monthStart}
               assignments={rows}
               absences={absences.data?.absences ?? []}
