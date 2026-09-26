@@ -18,11 +18,18 @@
 -- their engineers, and a rota either side of today so every view has
 -- something to show.
 --
--- This is a seed, not the allocator. It fills the shape the UI reads -- two
--- L1 and two L2 per zone per day, one of each from both SRE teams; one
--- morning slot, one morning on-call and three evening slots per CRE weekday
--- -- by round-robin over a stable ordering. The real allocator, with leave
--- awareness and swap handling, belongs in entity-service.
+-- This is a seed, not the allocator. It fills the shape the UI reads, by
+-- round-robin over a stable ordering:
+--
+--   CRE weekday   one morning 6-9am and one morning on-call, from any ABT;
+--                 evening 6-9pm from every ABT, so all seven are on it
+--   CRE weekend   three engineers from any ABT, plus one from Americas
+--   Americas      the whole team on night cover each weekday -- that is when
+--                 they work, not a rotation they take turns at
+--   SRE weekday   two L1 and two L2 per zone, one of each from both SRE teams
+--
+-- The real allocator, with leave awareness and swap handling, belongs in
+-- entity-service.
 --
 -- Ids are derived with md5() so re-running changes nothing and a given
 -- engineer keeps the same id across rebuilds.
@@ -100,40 +107,79 @@ LANGUAGE sql STABLE AS $$
 $$;
 
 -- ── CRE: the ABT rotations ────────────────────────────────────────────────
--- one morning, one morning on-call and three evening slots each weekday,
--- rotating through the ABT engineers in a stable order
-CREATE TEMP TABLE _abt (id UUID, team_key TEXT, rn INT, total INT) ON COMMIT DROP;
+-- Two pools over the same engineers, because the two rotations pick
+-- differently. The morning slots want one person from the ABTs collectively,
+-- so they rotate through a single flat order. The evening wants one person
+-- from each ABT, so it rotates within each team independently -- which is why
+-- every engineer carries both a global rank and a rank among their own team.
+CREATE TEMP TABLE _abt (
+  id UUID, team_key TEXT,
+  rn INT, total INT,          -- position in the flat, all-ABT order
+  trn INT, ttotal INT         -- position within this engineer's own team
+) ON COMMIT DROP;
 INSERT INTO _abt
 SELECT e.id, e.team_key,
        (row_number() OVER (ORDER BY t.ord, e.seq))::int,
-       (count(*) OVER ())::int
+       (count(*) OVER ())::int,
+       (row_number() OVER (PARTITION BY e.team_key ORDER BY e.seq))::int,
+       (count(*) OVER (PARTITION BY e.team_key))::int
 FROM _eng e JOIN _team t ON t.key = e.team_key
 WHERE e.family = 'cre-abt';
 
+-- Morning 6-9am and the morning on-call: one engineer each, from any ABT.
 INSERT INTO schedule_assignment
   (user_id, team_id, team_key, shift_id, zone_id, tier, rota_date, starts_at, ends_at, is_on_call, source, created_by, updated_by)
 SELECT a.id, md5('seed-team-'||a.team_key)::uuid, a.team_key, sp.shift_id, sp.zone_id, NULL,
        d.d, sp.starts_at, sp.ends_at, v.code = 'CRE_MORNING_OC', 'GENERATED', 'seed', 'seed'
 FROM _day d
-CROSS JOIN (VALUES ('CRE_MORNING',0),('CRE_MORNING_OC',1),('CRE_EVENING',2),('CRE_EVENING',3),('CRE_EVENING',4)) AS v(code, slot)
-JOIN _abt a ON a.rn = ((d.n * 5 + v.slot) % a.total) + 1
+CROSS JOIN (VALUES ('CRE_MORNING',0),('CRE_MORNING_OC',1)) AS v(code, slot)
+JOIN _abt a ON a.rn = ((d.n * 2 + v.slot) % a.total) + 1
 CROSS JOIN LATERAL _seed_span(d.d, v.code) sp
 WHERE NOT d.is_weekend
 ON CONFLICT DO NOTHING;
 
--- the weekend rotation: three ABT engineers a day
+-- Evening 6-9pm: one engineer from every ABT, so all seven are represented
+-- each weekday. Rotating within the team rather than across the whole pool is
+-- what guarantees that -- a flat pool of 100 would happily draw two from
+-- Vega and none from Rigel.
+INSERT INTO schedule_assignment
+  (user_id, team_id, team_key, shift_id, zone_id, tier, rota_date, starts_at, ends_at, is_on_call, source, created_by, updated_by)
+SELECT a.id, md5('seed-team-'||a.team_key)::uuid, a.team_key, sp.shift_id, sp.zone_id, NULL,
+       d.d, sp.starts_at, sp.ends_at, FALSE, 'GENERATED', 'seed', 'seed'
+FROM _day d
+JOIN _abt a ON a.trn = (d.n % a.ttotal) + 1
+CROSS JOIN LATERAL _seed_span(d.d, 'CRE_EVENING') sp
+WHERE NOT d.is_weekend
+ON CONFLICT DO NOTHING;
+
+-- The weekend rotation: three ABT engineers a day, deliberately from
+-- different ABTs.
+--
+-- The flat order runs team by team -- the first fifteen ranks are all Castor,
+-- the next sixteen all Draco -- so taking three *consecutive* ranks, as this
+-- did, put three people from the same team on almost every weekend. Spacing
+-- the three picks a third of the pool apart lands them in different teams,
+-- and stepping seven ranks a day -- a stride that shares no factor with the
+-- team sizes -- keeps the trio of teams itself changing from one weekend to
+-- the next rather than settling on the same three.
 INSERT INTO schedule_assignment
   (user_id, team_id, team_key, shift_id, zone_id, tier, rota_date, starts_at, ends_at, is_on_call, source, created_by, updated_by)
 SELECT a.id, md5('seed-team-'||a.team_key)::uuid, a.team_key, sp.shift_id, sp.zone_id, NULL,
        d.d, sp.starts_at, sp.ends_at, FALSE, 'GENERATED', 'seed', 'seed'
 FROM _day d
 CROSS JOIN generate_series(0,2) AS slot
-JOIN _abt a ON a.rn = ((d.n * 3 + slot) % a.total) + 1
+-- Keyed on the Saturday, not on the day: whoever takes a weekend takes both
+-- days of it, so Sunday resolves to the same three engineers Saturday did.
+-- `dow` is isodow, so Saturday is 6 and Sunday 7 -- subtracting (dow - 6)
+-- walks a Sunday back onto its own Saturday.
+JOIN _abt a ON a.rn = (((d.n - (d.dow - 6)) * 7 + slot * (a.total / 3)) % a.total) + 1
 CROSS JOIN LATERAL _seed_span(d.d, 'CRE_WEEKEND') sp
 WHERE d.is_weekend
 ON CONFLICT DO NOTHING;
 
--- Americas cover the night, every day
+-- Americas cover the night. On a weekday that is not a rota at all -- it is
+-- simply when the team works, so the whole team is on it. At the weekend it
+-- becomes a rota like the others, and one engineer takes it.
 INSERT INTO schedule_assignment
   (user_id, team_id, team_key, shift_id, zone_id, tier, rota_date, starts_at, ends_at, is_on_call, source, created_by, updated_by)
 SELECT e.id, md5('seed-team-americas')::uuid, 'americas', sp.shift_id, sp.zone_id, NULL,
@@ -141,6 +187,25 @@ SELECT e.id, md5('seed-team-americas')::uuid, 'americas', sp.shift_id, sp.zone_i
 FROM _day d
 JOIN _eng e ON e.team_key = 'americas'
 CROSS JOIN LATERAL _seed_span(d.d, 'CRE_AMERICAS') sp
+WHERE NOT d.is_weekend
+ON CONFLICT DO NOTHING;
+
+-- the weekend Americas rota: one engineer, rotating through the team
+CREATE TEMP TABLE _ame (id UUID, rn INT, total INT) ON COMMIT DROP;
+INSERT INTO _ame
+SELECT e.id,
+       (row_number() OVER (ORDER BY e.seq))::int,
+       (count(*) OVER ())::int
+FROM _eng e WHERE e.team_key = 'americas';
+
+INSERT INTO schedule_assignment
+  (user_id, team_id, team_key, shift_id, zone_id, tier, rota_date, starts_at, ends_at, is_on_call, source, created_by, updated_by)
+SELECT a.id, md5('seed-team-americas')::uuid, 'americas', sp.shift_id, sp.zone_id, NULL,
+       d.d, sp.starts_at, sp.ends_at, FALSE, 'GENERATED', 'seed', 'seed'
+FROM _day d
+JOIN _ame a ON a.rn = (d.n % a.total) + 1
+CROSS JOIN LATERAL _seed_span(d.d, 'CRE_AMERICAS') sp
+WHERE d.is_weekend
 ON CONFLICT DO NOTHING;
 
 -- ── SRE: two L1 and two L2 per zone per weekday, one of each per team ─────
