@@ -77,6 +77,20 @@ SELECT e.id, now(), now(), 'seed', 'seed',
 FROM _eng e JOIN _team t ON t.key = e.team_key
 ON CONFLICT (id) DO NOTHING;
 
+-- ── a manager ─────────────────────────────────────────────────────────────
+-- Deliberately gets a user row and NO team_member row. That absence is how a
+-- manager is recognised: they sit above the ABTs rather than in one, so
+-- /users/me resolves no team for them and the page reads that as "belongs to
+-- neither group" rather than having to carry a role flag of its own.
+--
+-- Sign in as manager@example.com (groups: cs_engineer) to exercise the view.
+INSERT INTO "user" (id, created_on, updated_on, created_by, updated_by,
+                    user_name, name, first_name, last_name, email, is_active, is_system_user)
+VALUES (md5('seed-manager-1')::uuid, now(), now(), 'seed', 'seed',
+        'manager@example.com', 'Morgan Manager', 'Morgan', 'Manager',
+        'manager@example.com', TRUE, FALSE)
+ON CONFLICT (id) DO NOTHING;
+
 INSERT INTO team_member (id, created_on, updated_on, created_by, updated_by, team_id, user_id, role)
 SELECT md5('seed-tm-'||e.team_key||'-'||e.seq)::uuid, now(), now(), 'seed', 'seed',
        md5('seed-team-'||e.team_key)::uuid, e.id,

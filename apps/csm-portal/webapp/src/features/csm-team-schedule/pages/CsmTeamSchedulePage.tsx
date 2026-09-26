@@ -117,20 +117,29 @@ export default function CsmTeamSchedulePage(): JSX.Element {
   const families: Family[] =
     myFamily === "SRE" ? ["SRE", "CRE"] : ["CRE", "SRE"];
 
-  /** Whether the group on screen is the reader's own.
-   *
-   *  Somebody on no team at all -- a manager -- is treated as at home in both,
-   *  because there is no "own group" for them to be outside of. */
-  const ownGroup = myFamily === undefined || myFamily === family;
+  /** Nobody's group: a manager, who belongs to no team at all. */
+  const isManager = myFamily === undefined;
 
-  /** Looking at the other group, only Today applies.
+  /** Whether the group on screen is the reader's own. */
+  const ownGroup = !isManager && myFamily === family;
+
+  /**
+   * Which views apply to this reader, on this group.
    *
-   *  Today answers "who is covering right now", which is a fair question to
-   *  ask of the other group -- a CRE engineer escalating to SRE needs it. My
-   *  week is the reader's own rota, and they have none there. This week and
-   *  the month roster are planning views for a rota the reader is not part of
-   *  and cannot act on, so they are the other group's business, not theirs. */
-  const appliesToView = (t: ViewTab): boolean => ownGroup || t === "today";
+   *   own group     all four -- their rota, their team, their month
+   *   other group   Today only. It answers "who is covering right now", which
+   *                 a CRE engineer escalating to SRE needs. This week and the
+   *                 roster are planning views for a rota they are not part of.
+   *   a manager     everything but My week, on both groups. The one thing
+   *                 that genuinely has nothing to show them is their own rota,
+   *                 because they hold none. Who is covering -- today, across
+   *                 the week, across the month -- is their question for CRE
+   *                 and SRE alike, so the roster is theirs to read too.
+   */
+  const appliesToView = (t: ViewTab): boolean => {
+    if (isManager) return t !== "mine";
+    return ownGroup || t === "today";
+  };
 
   /** The tab actually being shown.
    *
@@ -288,9 +297,11 @@ export default function CsmTeamSchedulePage(): JSX.Element {
                 disabled={off}
                 aria-disabled={off}
                 title={
-                  off
-                    ? `You are on ${myFamily}. Only “Who is working today” applies to ${family}.`
-                    : undefined
+                  !off
+                    ? undefined
+                    : isManager
+                      ? "You hold no rota, so this view has nothing of yours to show."
+                      : `You are on ${myFamily}. Only “Who is working today” applies to ${family}.`
                 }
                 onClick={() => setTab(t)}
               >
