@@ -190,11 +190,26 @@ FROM _eng e
 JOIN schedule_absence_kind k ON k.code = CASE WHEN e.seq % 2 = 0 THEN 'ANNUAL_LEAVE' ELSE 'LIEU_LEAVE' END
 WHERE e.seq IN (4, 9);
 
+-- Standing allocations, and the two groups do not draw from the same list.
+-- CRE carries migration work; SRE does not -- an SRE engineer is either on
+-- R&D or sitting with a customer, on site or off. Seeding migration against
+-- SRE would put a category in their off-rota column that does not exist for
+-- them.
 INSERT INTO schedule_absence (user_id, team_key, kind_id, starts_on, ends_on, note, created_by, updated_by)
 SELECT e.id, e.team_key, k.id, CURRENT_DATE - 60, NULL, 'standing allocation', 'seed', 'seed'
 FROM _eng e
-JOIN schedule_absence_kind k ON k.code = CASE e.seq WHEN 5 THEN 'RND' WHEN 6 THEN 'CUSTOMER' ELSE 'MIGRATION' END
-WHERE e.seq IN (5, 6, 7) AND e.family <> 'sre-abt';
+JOIN schedule_absence_kind k
+  ON k.code = CASE
+       WHEN e.family = 'sre-abt' THEN
+         CASE e.seq WHEN 5 THEN 'RND'
+                    WHEN 6 THEN 'CUSTOMER_ONSITE'
+                    ELSE 'CUSTOMER_OFFSITE' END
+       ELSE
+         CASE e.seq WHEN 5 THEN 'RND'
+                    WHEN 6 THEN 'CUSTOMER'
+                    ELSE 'MIGRATION' END
+     END
+WHERE e.seq IN (5, 6, 7);
 
 -- ── everyone else works regular hours ─────────────────────────────────────
 -- stored, not derived: see the note at the top

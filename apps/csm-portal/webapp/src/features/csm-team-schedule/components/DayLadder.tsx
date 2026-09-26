@@ -18,7 +18,15 @@
 
 import { useEffect, useMemo, useRef, useState, type JSX } from "react";
 import type { ScheduleAbsence, ScheduleAbsenceKind, ScheduleAssignment, ScheduleShift, ScheduleZone } from "../types";
-import { groupBy, initialsOf, partsInZone, placeOnDay, timeOf, toIsoDate } from "../utils/rota";
+import {
+  dayLabel,
+  groupBy,
+  initialsOf,
+  partsInZone,
+  placeOnDay,
+  timeOf,
+  toIsoDate,
+} from "../utils/rota";
 import { teamColour } from "../utils/rotaHues";
 
 /** Pixels per hour, as the prototype draws it. */
@@ -32,8 +40,14 @@ const HOUR_PX = 38;
  * engineer into "Apollo Engin...". The lanes widen past the viewport instead
  * and the day scrolls sideways, which is what a calendar does when a day is
  * busy.
+ *
+ * 170 is what lets three zones, each split in two, plus the off-rota column
+ * fit a laptop without scrolling sideways -- measured at 1350px of usable
+ * width. It only works because the "others in the zone" cards drop their team
+ * tag: inside a zone lane the avatar colour already says which team someone is
+ * on, and the full name and team stay on the row's tooltip.
  */
-const MIN_COLUMN_PX = 196;
+const MIN_COLUMN_PX = 166;
 
 const px = (minutes: number): number => Math.round((minutes / 60) * HOUR_PX);
 
@@ -61,6 +75,8 @@ interface DayLadderProps {
   day: Date;
   /** The clock the reader has picked; blocks are placed on it. */
   tz: string;
+  /** Short name for that clock, shown at the head of the hour axis. */
+  zoneLabel: string;
   lanes: LadderLane[];
   shifts: Map<string, ScheduleShift>;
   zones: ScheduleZone[];
@@ -86,6 +102,9 @@ interface Block {
   rows: ScheduleAssignment[];
   /** Labelled rows, for a card that holds more than one kind of person. */
   sections?: BlockRow[];
+  /** Drop the trailing tag on each name, where the surrounding card already
+   *  says what it would have said. */
+  hideTags?: boolean;
 }
 
 /** The escalation tiers, in the order the rota talks about them. */
@@ -100,8 +119,12 @@ function noteFor(
   row: ScheduleAssignment,
   tz: string,
 ): string {
-  if (placement.continuesNextDay) return `runs to ${timeOf(row.endsAt, tz)} tomorrow`;
-  if (placement.startedPreviousDay) return `started ${timeOf(row.startsAt, tz)} yesterday`;
+  if (placement.continuesNextDay) {
+    return `runs to ${timeOf(row.endsAt, tz)} · ${dayLabel(row.endsAt, tz)}`;
+  }
+  if (placement.startedPreviousDay) {
+    return `started ${timeOf(row.startsAt, tz)} · ${dayLabel(row.startsAt, tz)}`;
+  }
   return "";
 }
 
@@ -124,6 +147,7 @@ export default function DayLadder({
   absences,
   absenceKinds,
   tz,
+  zoneLabel,
 }: DayLadderProps): JSX.Element {
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const touched = useRef(false);
@@ -205,6 +229,7 @@ export default function DayLadder({
       const others = cardsPerWindow(lane.name, ordinary).map((c) => ({
         ...c,
         title: `Others in ${lane.name}`,
+        hideTags: true,
       }));
       return { ...lane, columns: [escalationCards(lane.name, tiered), others] };
     });
@@ -243,13 +268,32 @@ export default function DayLadder({
   for (let h = 0; h <= 24; h += 2) hours.push(h);
 
   return (
-    <>
-      <div className="ladhd">
+    <div className="ladwrap" ref={wrapRef} onScroll={() => (touched.current = true)}>
+      {/* Inside the scroller, not above it. Sitting outside, the headings kept
+          their own horizontal position while the lanes moved under them, so
+          the moment the day was wider than the window TZ2's heading sat over
+          TZ1's column. Sticky to the top keeps them visible while the day
+          scrolls down; being in the same scroller keeps them over the right
+          column while it scrolls across. */}
+      <div className="ladhd" style={{ minWidth: ladderWidth }}>
+        {/* The clock sits at the head of the column of times it describes,
+            aligned with the hours below it -- the same place a table puts a
+            unit. A sentence above the card said the same thing in a whole row
+            of space, nowhere near the numbers it was about. */}
+        <span className="axistz" title={`${tz} — from your CSM profile`}>
+          {zoneLabel}
+        </span>
         {built.map((lane) => (
           <div
             key={lane.name}
             className="lnh"
-            style={{ ["--zc" as string]: lane.colour ?? "var(--faint)" }}
+            style={{
+              ["--zc" as string]: lane.colour ?? "var(--faint)",
+              // The same floor its lane has. Without it the heading row and
+              // the lane row distribute their flex space differently and each
+              // heading sits a few pixels off the column it names.
+              minWidth: Math.max(1, lane.columns.length) * MIN_COLUMN_PX,
+            }}
           >
             <span className="zchip">{lane.name}</span>
             <span className="lnt">{lane.sub ?? ""}</span>
@@ -261,8 +305,7 @@ export default function DayLadder({
         </div>
       </div>
 
-      <div className="ladwrap" ref={wrapRef} onScroll={() => (touched.current = true)}>
-        <div className="ladder" style={{ height: px(1440) + 8, minWidth: ladderWidth }}>
+      <div className="ladder" style={{ height: px(1440) + 8, minWidth: ladderWidth }}>
           <div className="lax">
             {hours.map((h) => (
               <span key={h} className="hr" style={{ top: px(h * 60) }}>
@@ -313,10 +356,9 @@ export default function DayLadder({
             <div className="lane offlane" style={{ ["--zc" as string]: "var(--muted)" }}>
               <OffRotaStack absences={absences} kinds={absenceKinds} />
             </div>
-          </div>
         </div>
       </div>
-    </>
+    </div>
   );
 }
 
@@ -371,7 +413,7 @@ function LadderBlock({ block, tz }: { block: Block; tz: string }): JSX.Element {
           <>
             <div className="zsec">
               {shown.map((a) => (
-                <NameRow key={a.id} assignment={a} />
+                <NameRow key={a.id} assignment={a} hideTag={block.hideTags} />
               ))}
             </div>
             {hidden > 0 ? <span className="lmore">+{hidden} more</span> : null}

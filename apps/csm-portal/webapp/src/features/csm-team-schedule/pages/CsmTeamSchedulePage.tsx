@@ -30,7 +30,8 @@ import MyWeekStrip from "../components/MyWeekStrip";
 import WeekTable from "../components/WeekTable";
 import type { ScheduleAssignment } from "../types";
 import { resolveDisplayTimeZone } from "@utils/dateTime";
-import { addDays, mondayOf, shiftsByCode, toIsoDate, zoneChoices } from "../utils/rota";
+import { addDays, mondayOf, shiftsByCode, toIsoDate, zoneAbbreviation } from "../utils/rota";
+import { zoneColour } from "../utils/rotaHues";
 import { SCHEDULE_THEME_VARS } from "../utils/useScheduleTheme";
 import "../teamSchedule.css";
 
@@ -77,16 +78,16 @@ export default function CsmTeamSchedulePage(): JSX.Element {
   const [family, setFamily] = useState<Family>("CRE");
   const [teamKey, setTeamKey] = useState<string>("");
   const [anchor, setAnchor] = useState<Date>(() => new Date());
-  const [zoneOverride, setZoneOverride] = useState<string | null>(null);
 
   const { user } = useCurrentUser();
-  // The clock this reader is on. It starts from their CSM profile timezone --
-  // set it there once and every view follows, including after a move from
-  // Colombo to San Francisco -- and the named zones are overrides for looking
-  // at someone else's day.
-  const profileTz = resolveDisplayTimeZone(user?.timeZone);
-  const zoneOptions = useMemo(() => zoneChoices(profileTz), [profileTz]);
-  const tz = zoneOverride ?? profileTz;
+  // The clock this reader is on, and the only source of it: their CSM profile
+  // timezone, through the portal's own resolver. Set it there once and every
+  // view follows, including after a move from Colombo to San Francisco.
+  //
+  // There is deliberately no picker on this page. A second control could
+  // disagree with the profile, and then two people comparing the same rota
+  // over a call have no way of knowing whose clock they are each reading.
+  const tz = resolveDisplayTimeZone(user?.timeZone);
   const catalogue = useScheduleCatalogue();
 
   const weekStart = useMemo(() => mondayOf(anchor), [anchor]);
@@ -129,7 +130,16 @@ export default function CsmTeamSchedulePage(): JSX.Element {
     tab === "mine" && Boolean(user?.email),
   );
 
-  const absences = useScheduleAbsences({ from, to, teamKeys }, dayView || rosterView);
+  // Off rota follows the CRE/SRE choice like everything else on the page.
+  // Without this it showed every absence in the company, so SRE's column
+  // carried CRE's migration allocations -- people SRE has no relationship to.
+  // The search filters by team, so an unfiltered view passes the family's own
+  // teams rather than nothing.
+  const absenceTeamKeys = teamKeys ?? TEAMS[family];
+  const absences = useScheduleAbsences(
+    { from, to, teamKeys: absenceTeamKeys },
+    dayView || rosterView,
+  );
 
   const shifts = useMemo(() => shiftsByCode(catalogue.data?.shifts ?? []), [catalogue.data?.shifts]);
   const zones = catalogue.data?.zones ?? [];
@@ -146,7 +156,7 @@ export default function CsmTeamSchedulePage(): JSX.Element {
     return zones.map((z) => ({
       name: z.code,
       sub: z.label,
-      colour: `var(--${z.code.toLowerCase()}-fg, var(--faint))`,
+      colour: zoneColour(z.code),
       assignments: rows.filter((a) => a.zoneCode === z.code),
       // Escalation on one side, everyone else in the zone on the other.
       layout: "zone" as const,
@@ -202,21 +212,6 @@ export default function CsmTeamSchedulePage(): JSX.Element {
                 ))}
               </div>
 
-              <div className="seg tzseg" aria-label="Show times in this timezone">
-                {zoneOptions.map((z) => (
-                  <button
-                    key={z.id}
-                    className={tz === z.tz ? "on" : ""}
-                    onClick={() => setZoneOverride(z.tz === profileTz ? null : z.tz)}
-                    title={
-                      z.tz === profileTz ? `${z.tz} — from your CSM profile` : z.tz
-                    }
-                  >
-                    {z.label}
-                  </button>
-                ))}
-              </div>
-
               <select
                 className="teampick"
                 aria-label="Show one team"
@@ -264,6 +259,7 @@ export default function CsmTeamSchedulePage(): JSX.Element {
             <DayLadder
               day={anchor}
               tz={tz}
+              zoneLabel={zoneAbbreviation(tz)}
               lanes={lanes}
               shifts={shifts}
               zones={zones}
@@ -279,6 +275,7 @@ export default function CsmTeamSchedulePage(): JSX.Element {
               absences={absences.data?.absences ?? []}
               shifts={shifts}
               absenceKinds={catalogue.data?.absenceKinds ?? []}
+              scope={`${family} · ${teamKey ? teamKey.charAt(0).toUpperCase() + teamKey.slice(1) : "All teams"}`}
             />
           ) : (
             <MyWeekStrip

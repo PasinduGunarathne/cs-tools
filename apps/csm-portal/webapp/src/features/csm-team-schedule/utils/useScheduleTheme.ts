@@ -39,6 +39,16 @@ import type { CSSProperties } from "react";
 export const SCHEDULE_THEME_VARS: CSSProperties = {
   "--ground": "var(--oxygen-palette-background-default)",
   "--surface": "var(--oxygen-palette-background-paper)",
+  /*
+   * An opaque surface, for anything that has to sit over scrolling content.
+   *
+   * The portal's paper colour carries alpha (#ffffffc5 in the light themes),
+   * which is fine for a card sitting still and wrong for a sticky one: the
+   * roster's engineer column let thirty days of cells scroll straight through
+   * it, and the lane headings had the same problem. background-default has no
+   * alpha, so things pinned over the page actually cover it.
+   */
+  "--surface-solid": "var(--oxygen-palette-background-default)",
   "--surface-2": "var(--oxygen-palette-action-hover)",
   "--surface-3": "var(--oxygen-palette-action-selected)",
   "--ink": "var(--oxygen-palette-text-primary)",

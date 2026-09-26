@@ -18,27 +18,6 @@
 
 import type { ScheduleAssignment, ScheduleShift } from "../types";
 
-/**
- * The clocks a reader can view the rota on. The rota is authored in IST; the
- * rest are where the teams actually sit, so an Americas engineer can read their
- * own day without doing the arithmetic.
- *
- * Labels follow daylight saving through Intl, so Chicago reads CDT in summer
- * and CST in winter rather than the page lying about it. Brazil abolished DST
- * in 2019, so BRT is stable.
- */
-export const VIEW_ZONES = [
-  { id: "IST", tz: "Asia/Colombo", label: "IST" },
-  { id: "BRT", tz: "America/Sao_Paulo", label: "BRT" },
-  { id: "CDT", tz: "America/Chicago", label: "CDT" },
-  { id: "PDT", tz: "America/Los_Angeles", label: "PDT" },
-] as const;
-
-export type ViewZoneId = (typeof VIEW_ZONES)[number]["id"];
-
-export function zoneOf(id: ViewZoneId): string {
-  return VIEW_ZONES.find((z) => z.id === id)?.tz ?? "Asia/Colombo";
-}
 
 /**
  * The short label for an IANA zone, as that zone calls itself right now.
@@ -47,36 +26,37 @@ export function zoneOf(id: ViewZoneId): string {
  * CDT in September and CST in January, instead of the page asserting one of
  * them all year.
  */
+/**
+ * What the teams call these zones, where Intl has no short name for them.
+ *
+ * Asia/Colombo comes back from Intl as "GMT+5:30" -- correct, and not what
+ * anyone on this rota says. The rota is written in IST and everyone refers to
+ * it that way, so the page should too. Brazil is the same story: no
+ * abbreviation in the CLDR data, and BRT is what the Americas team says.
+ *
+ * Everything else falls through to Intl, which follows daylight saving --
+ * Chicago reads CDT in September and CST in January rather than the page
+ * asserting one of them all year.
+ */
+const LOCAL_ZONE_NAMES: Record<string, string> = {
+  "Asia/Colombo": "IST",
+  "Asia/Kolkata": "IST",
+  "America/Sao_Paulo": "BRT",
+};
+
 export function zoneAbbreviation(tz: string): string {
+  const known = LOCAL_ZONE_NAMES[tz];
+  if (known) return known;
   try {
     const name = new Intl.DateTimeFormat("en-US", { timeZone: tz, timeZoneName: "short" })
       .formatToParts(new Date())
       .find((p) => p.type === "timeZoneName")?.value;
-    // Zones with no abbreviation come back as "GMT+5:30", which reads better
-    // than nothing but is not a name.
     return name ?? tz;
   } catch {
     return tz;
   }
 }
 
-/**
- * Which zone the rota should be read on, given the user's profile.
- *
- * The portal already resolves a display timezone for every user -- profile
- * first, then the browser. The rota follows it, so an engineer who moves from
- * Colombo to San Francisco changes it once in their profile and every view
- * follows; they should not have to re-pick a clock on this page as well.
- *
- * The named zones stay as quick overrides for looking at someone else's day.
- */
-export function zoneChoices(profileTz: string): { id: string; tz: string; label: string }[] {
-  const named = VIEW_ZONES.map((z) => ({ id: z.id as string, tz: z.tz, label: z.label }));
-  if (named.some((z) => z.tz === profileTz)) return named;
-  // A profile zone outside the four still has to be offered, and first: it is
-  // this reader's own clock.
-  return [{ id: "PROFILE", tz: profileTz, label: zoneAbbreviation(profileTz) }, ...named];
-}
 
 /**
  * An instant broken into the calendar date and minutes-past-midnight that a
@@ -138,6 +118,35 @@ const DOW_SHORT = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 /** Monday-first weekday name, matching how the week grid is laid out. */
 export function shortDayName(d: Date): string {
   return DOW_SHORT[(d.getDay() + 6) % 7];
+}
+
+/**
+ * The calendar day an instant falls on, as the reader's clock sees it:
+ * "Thu 24 Sep 2026".
+ *
+ * A card that runs past midnight used to say only "started 21:00 yesterday".
+ * "Yesterday" is relative to the day being looked at, not to today, so on any
+ * view but the current one it quietly means the wrong thing -- and on a page
+ * where the reader can also change timezone, "yesterday" can move under them.
+ * The date says it outright.
+ */
+export function dayLabel(iso: string, tz?: string): string {
+  const zone = tz ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const [y, m, d] = partsInZone(iso, zone).date.split("-").map(Number);
+  // Built as a local calendar date on purpose: the zone conversion already
+  // happened above, and re-applying one here would shift it back.
+  //
+  // The locale is pinned rather than taken from the browser. This rota is read
+  // in Colombo, São Paulo and the US, where a numeric date is genuinely
+  // ambiguous -- 09/10 is two different days depending on who is reading it --
+  // and a card that says when a night shift started cannot afford that. Day,
+  // abbreviated month, year reads the same everywhere.
+  return new Date(y, m - 1, d).toLocaleDateString("en-GB", {
+    weekday: "short",
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+  });
 }
 
 /** An instant as HH:MM on the clock the reader has picked. */

@@ -134,6 +134,26 @@ export const TEAM_COLOURS: Record<string, string> = {
   artemis: "#8a63d2",
 };
 
+/**
+ * The SRE time zones, in the prototype's own hues.
+ *
+ * These were JS constants there, not CSS tokens -- which is why an earlier
+ * version of this page referenced --tz1-fg and friends, found nothing, and
+ * drew all three lanes in the same fallback grey. A zone's colour is how a
+ * reader tells the three columns apart at a glance, so it is worth being
+ * explicit about.
+ */
+export const ZONE_COLOURS: Record<string, string> = {
+  TZ1: "#e8962a",
+  TZ2: "#4a7fe0",
+  TZ3: "#8a63d2",
+};
+
+/** The colour for a time zone, falling back to a neutral for one not listed. */
+export function zoneColour(code: string): string {
+  return ZONE_COLOURS[code.toUpperCase()] ?? "#6b7280";
+}
+
 /** The colour for a team, falling back to a neutral for one not listed. */
 export function teamColour(teamKey: string): string {
   return TEAM_COLOURS[teamKey.toLowerCase()] ?? "#6b7280";

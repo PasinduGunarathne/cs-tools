@@ -32,6 +32,9 @@ interface MonthRosterProps {
   absences: ScheduleAbsence[];
   shifts: Map<string, ScheduleShift>;
   absenceKinds: ScheduleAbsenceKind[];
+  /** What the page toolbar is currently filtered to, stated so the roster
+   *  does not look like it is showing everyone when it is not. */
+  scope: string;
 }
 
 interface Cell {
@@ -54,6 +57,7 @@ export default function MonthRoster({
   absences,
   shifts,
   absenceKinds,
+  scope,
 }: MonthRosterProps): JSX.Element {
   const [query, setQuery] = useState("");
 
@@ -129,6 +133,10 @@ export default function MonthRoster({
   return (
     <>
       <div className="rosterbar">
+        <span className="scope">
+          <b>{scope}</b> · {rows.length}
+          {rows.length === grid.length ? "" : ` of ${grid.length}`} engineers
+        </span>
         <input
           className="rosterq"
           type="search"
@@ -137,9 +145,6 @@ export default function MonthRoster({
           value={query}
           onChange={(e) => setQuery(e.target.value)}
         />
-        <span className="grp">
-          {rows.length} of {grid.length} engineers
-        </span>
       </div>
 
       <div className="twwrap">

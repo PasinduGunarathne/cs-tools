@@ -19,6 +19,8 @@
 import { describe, expect, it } from "vitest";
 import type { ScheduleAssignment, ScheduleShift } from "../types";
 import {
+  dayLabel,
+  zoneAbbreviation,
   isPeerRotation,
   isRotationShift,
   mondayOf,
@@ -26,8 +28,6 @@ import {
   placeOnDay,
   timeOf,
   toIsoDate,
-  zoneChoices,
-  zoneOf,
 } from "./rota";
 
 const IST = "Asia/Colombo";
@@ -124,6 +124,25 @@ describe("placeOnDay", () => {
   });
 });
 
+describe("dayLabel", () => {
+  it("names the day the instant falls on, in the reader's zone", () => {
+    // 15:30Z on the 21st is still Monday the 21st in Colombo.
+    // en-GB abbreviates September as "Sept", not "Sep".
+    expect(dayLabel("2026-09-21T15:30:00Z", IST)).toBe("Mon, 21 Sept 2026");
+  });
+
+  it("rolls to the previous day when the reader is far enough west", () => {
+    // 00:30Z on the 22nd is the evening of the 21st in Los Angeles.
+    expect(dayLabel("2026-09-22T00:30:00Z", "America/Los_Angeles")).toBe("Mon, 21 Sept 2026");
+  });
+
+  it("does not change shape with the reader's own locale", () => {
+    // A numeric date would read as two different days in the US and the UK;
+    // this rota is read in both, so the format is pinned.
+    expect(dayLabel("2026-09-21T15:30:00Z", IST)).not.toMatch(/\d+\/\d+/);
+  });
+});
+
 describe("timeOf", () => {
   it("renders the instant on the chosen clock", () => {
     expect(timeOf("2026-09-21T15:30:00Z", IST)).toBe("21:00");
@@ -150,6 +169,19 @@ describe("isRotationShift", () => {
   });
 });
 
+describe("zoneAbbreviation", () => {
+  it("uses the name the teams actually say", () => {
+    // Intl returns "GMT+5:30" for Colombo; the rota is written in IST and
+    // everyone calls it that.
+    expect(zoneAbbreviation("Asia/Colombo")).toBe("IST");
+    expect(zoneAbbreviation("America/Sao_Paulo")).toBe("BRT");
+  });
+
+  it("falls through to Intl elsewhere, so it follows daylight saving", () => {
+    expect(["CDT", "CST"]).toContain(zoneAbbreviation("America/Chicago"));
+  });
+});
+
 describe("isPeerRotation", () => {
   it("excludes regular hours and the Americas night cover", () => {
     // Americas work their own standing shift every day rather than taking a
@@ -161,24 +193,3 @@ describe("isPeerRotation", () => {
   });
 });
 
-describe("zoneChoices", () => {
-  it("offers the four named zones when the profile is one of them", () => {
-    const zones = zoneChoices("America/Chicago");
-    expect(zones.map((z) => z.id)).toEqual(["IST", "BRT", "CDT", "PDT"]);
-  });
-
-  it("puts a profile zone outside the four first, as the reader's own clock", () => {
-    const zones = zoneChoices("Europe/London");
-    expect(zones[0].tz).toBe("Europe/London");
-    expect(zones).toHaveLength(5);
-  });
-});
-
-describe("zoneOf", () => {
-  it("maps the picker's labels onto real IANA zones", () => {
-    expect(zoneOf("IST")).toBe("Asia/Colombo");
-    expect(zoneOf("BRT")).toBe("America/Sao_Paulo");
-    expect(zoneOf("CDT")).toBe("America/Chicago");
-    expect(zoneOf("PDT")).toBe("America/Los_Angeles");
-  });
-});
