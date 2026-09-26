@@ -51,7 +51,7 @@ export function useScheduleCatalogue(): UseQueryResult<ScheduleCatalogue, Error>
   const api = useBackendApi();
   return useQuery<ScheduleCatalogue, Error>({
     queryKey: QK.catalogue,
-    queryFn: async () => (await api.get<ScheduleCatalogue>("/schedule/catalogue")) ?? {
+    queryFn: async () => (await api.get<ScheduleCatalogue>("/team-schedule/catalogue")) ?? {
       zones: [],
       shifts: [],
       absenceKinds: [],
@@ -70,7 +70,7 @@ export function useScheduleAssignments(
     queryKey: QK.assignments(payload),
     queryFn: () =>
       api.post<SearchScheduleAssignmentsPayload, ScheduleAssignmentsResponse>(
-        "/schedule/assignments/search",
+        "/team-schedule/assignments/search",
         payload,
       ),
     enabled,
@@ -89,7 +89,7 @@ export function useScheduleAbsences(
     queryKey: QK.absences(payload),
     queryFn: () =>
       api.post<SearchScheduleAbsencesPayload, ScheduleAbsencesResponse>(
-        "/schedule/absences/search",
+        "/team-schedule/absences/search",
         payload,
       ),
     enabled,

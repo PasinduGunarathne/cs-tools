@@ -70,15 +70,14 @@ apply_pending_migrations() {
   for f in $(ls "${dir}"/*.up.sql | sort); do
     version="$(basename "$f" .up.sql)"
     already="$($PSQL -d "$db" -tAc "SELECT 1 FROM schema_migrations WHERE version = '${version}'")"
-    if [ "$already" = "1" ]; then
-      continue
+    if [ "$already" != "1" ]; then
+      echo "[migrate]   applying $f"
+      tmp="$(mktemp)"
+      cat "$f" > "$tmp"
+      printf "\nINSERT INTO schema_migrations (version) VALUES ('%s');\n" "$version" >> "$tmp"
+      $PSQL -d "$db" -1 -f "$tmp"
+      rm -f "$tmp"
     fi
-    echo "[migrate]   applying $f"
-    tmp="$(mktemp)"
-    cat "$f" > "$tmp"
-    printf "\nINSERT INTO schema_migrations (version) VALUES ('%s');\n" "$version" >> "$tmp"
-    $PSQL -d "$db" -1 -f "$tmp"
-    rm -f "$tmp"
 
     # A fixture named for this migration runs straight after it, in the same
     # pass. Some migrations backfill rows that only ServiceNow supplies and
@@ -87,10 +86,25 @@ apply_pending_migrations() {
     # those rows at the moment they first become insertable, so the real
     # migration runs unmodified. Local dev only; nothing reads /migrations/
     # fixtures outside this compose stack.
+    #
+    # A fixture is recorded as its own row, `fixture:<version>`, and checked
+    # independently of its migration. Otherwise a fixture that failed after
+    # its migration was recorded would never be retried, and a volume whose
+    # migration ran before the fixture existed would never get it -- leaving
+    # the later migration that needs its rows failing on every run. Still run
+    # here, inside the loop, so it lands before any later migration does.
+    # Fixtures must therefore be safe to re-run (ON CONFLICT DO NOTHING).
     fixture="/migrations/fixtures/${version}.sql"
     if [ -f "$fixture" ]; then
-      echo "[migrate]     + fixture ${version}.sql"
-      $PSQL -d "$db" -1 -f "$fixture"
+      loaded="$($PSQL -d "$db" -tAc "SELECT 1 FROM schema_migrations WHERE version = 'fixture:${version}'")"
+      if [ "$loaded" != "1" ]; then
+        echo "[migrate]     + fixture ${version}.sql"
+        tmp="$(mktemp)"
+        cat "$fixture" > "$tmp"
+        printf "\nINSERT INTO schema_migrations (version) VALUES ('fixture:%s');\n" "$version" >> "$tmp"
+        $PSQL -d "$db" -1 -f "$tmp"
+        rm -f "$tmp"
+      fi
     fi
   done
 }

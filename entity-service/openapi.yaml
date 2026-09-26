@@ -5288,7 +5288,7 @@ paths:
                 $ref: '#/components/schemas/ErrorResponse'
 
 
-  /schedule/catalogue:
+  /team-schedule/catalogue:
     get:
       summary: The Team Schedule catalogue — time zones, shift windows and absence kinds.
       description: >
@@ -5303,13 +5303,25 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ScheduleCatalogue'
+        "401":
+          description: No user token and not an authorized internal client.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "403":
+          description: The caller is not internal staff — the rota is not available to customers.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         "500":
           description: Unexpected error.
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
-  /schedule/assignments/search:
+  /team-schedule/assignments/search:
     post:
       summary: Who is working over a date window.
       description: >
@@ -5336,7 +5348,25 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
-  /schedule/absences/search:
+        "401":
+          description: No user token and not an authorized internal client.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "403":
+          description: The caller is not internal staff — the rota is not available to customers.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "500":
+          description: Unexpected error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /team-schedule/absences/search:
     post:
       summary: Who is out of the rota over a date window.
       operationId: searchScheduleAbsences
@@ -5359,7 +5389,25 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
-  /schedule/on-duty:
+        "401":
+          description: No user token and not an authorized internal client.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "403":
+          description: The caller is not internal staff — the rota is not available to customers.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "500":
+          description: Unexpected error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /team-schedule/on-duty:
     get:
       summary: Who is responsible at this instant.
       description: >
@@ -5383,6 +5431,24 @@ paths:
                 $ref: '#/components/schemas/ScheduleAssignmentsResponse'
         "400":
           description: Bad request — `at` is not an RFC3339 instant.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "401":
+          description: No user token and not an authorized internal client.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "403":
+          description: The caller is not internal staff — the rota is not available to customers.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "500":
+          description: Unexpected error.
           content:
             application/json:
               schema:

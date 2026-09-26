@@ -75,7 +75,7 @@ func readScheduleBody(w http.ResponseWriter, r *http.Request) (body []byte, user
 	return body, user.UserID, true
 }
 
-// GetScheduleCatalogue handles GET /schedule/catalogue.
+// GetScheduleCatalogue handles GET /team-schedule/catalogue.
 func (h *ScheduleHandler) GetScheduleCatalogue(w http.ResponseWriter, r *http.Request) {
 	user := middleware.UserInfoFromContext(r.Context())
 	if user == nil {
@@ -93,7 +93,7 @@ func (h *ScheduleHandler) GetScheduleCatalogue(w http.ResponseWriter, r *http.Re
 	writeJSON(w, http.StatusOK, result)
 }
 
-// SearchScheduleAssignments handles POST /schedule/assignments/search.
+// SearchScheduleAssignments handles POST /team-schedule/assignments/search.
 func (h *ScheduleHandler) SearchScheduleAssignments(w http.ResponseWriter, r *http.Request) {
 	body, userID, ok := readScheduleBody(w, r)
 	if !ok {
@@ -110,7 +110,7 @@ func (h *ScheduleHandler) SearchScheduleAssignments(w http.ResponseWriter, r *ht
 	writeJSON(w, http.StatusOK, result)
 }
 
-// SearchScheduleAbsences handles POST /schedule/absences/search.
+// SearchScheduleAbsences handles POST /team-schedule/absences/search.
 func (h *ScheduleHandler) SearchScheduleAbsences(w http.ResponseWriter, r *http.Request) {
 	body, userID, ok := readScheduleBody(w, r)
 	if !ok {
@@ -127,7 +127,7 @@ func (h *ScheduleHandler) SearchScheduleAbsences(w http.ResponseWriter, r *http.
 	writeJSON(w, http.StatusOK, result)
 }
 
-// GetScheduleOnDuty handles GET /schedule/on-duty[?at=RFC3339] -- who is
+// GetScheduleOnDuty handles GET /team-schedule/on-duty[?at=RFC3339] -- who is
 // responsible at this instant. The `at` parameter is passed through unchanged;
 // the entity service validates it.
 func (h *ScheduleHandler) GetScheduleOnDuty(w http.ResponseWriter, r *http.Request) {

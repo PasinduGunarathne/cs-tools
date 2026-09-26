@@ -660,7 +660,7 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, func()) {
 			service.NewAnnouncementRequestService(repository.NewAnnouncementRequestRepository(db), activeCaseSvc, accessSvc),
 		)
 		scheduleHandler = handler.NewScheduleHandler(
-			service.NewScheduleService(repository.NewScheduleRepository(db)),
+			service.NewScheduleService(repository.NewScheduleRepository(db), accessSvc),
 		)
 	}
 	// activeAttachmentSvc backs the case-attachment routes registered below
@@ -1029,10 +1029,10 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, func()) {
 		mux.HandleFunc("POST /alert-incident-mappings/lookup", alertIncidentMappingHandler.LookupAlertIncidentMappings)
 	}
 	if scheduleHandler != nil {
-		mux.HandleFunc("GET /schedule/catalogue", scheduleHandler.GetScheduleCatalogue)
-		mux.HandleFunc("POST /schedule/assignments/search", scheduleHandler.SearchScheduleAssignments)
-		mux.HandleFunc("POST /schedule/absences/search", scheduleHandler.SearchScheduleAbsences)
-		mux.HandleFunc("GET /schedule/on-duty", scheduleHandler.GetScheduleOnDuty)
+		mux.HandleFunc("GET /team-schedule/catalogue", scheduleHandler.GetScheduleCatalogue)
+		mux.HandleFunc("POST /team-schedule/assignments/search", scheduleHandler.SearchScheduleAssignments)
+		mux.HandleFunc("POST /team-schedule/absences/search", scheduleHandler.SearchScheduleAbsences)
+		mux.HandleFunc("GET /team-schedule/on-duty", scheduleHandler.GetScheduleOnDuty)
 	}
 	if announcementRequestHandler != nil {
 		mux.HandleFunc("POST /announcement-requests", announcementRequestHandler.CreateAnnouncementRequest)

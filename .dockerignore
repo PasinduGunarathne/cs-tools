@@ -15,5 +15,5 @@
 **/.vite
 
 # Local environment files never belong in an image.
-**/.env
-**/.env.local
+**/.env*
+!**/.env.example

@@ -42,7 +42,7 @@ func writeScheduleJSON(w http.ResponseWriter, status int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
-// GetScheduleCatalogue handles GET /schedule/catalogue -- the zones, windows
+// GetScheduleCatalogue handles GET /team-schedule/catalogue -- the zones, windows
 // and absence kinds a client needs before it can draw anything.
 func (h *ScheduleHandler) GetScheduleCatalogue(w http.ResponseWriter, r *http.Request) {
 	cat, err := h.svc.Catalogue(r.Context())
@@ -53,7 +53,7 @@ func (h *ScheduleHandler) GetScheduleCatalogue(w http.ResponseWriter, r *http.Re
 	writeScheduleJSON(w, http.StatusOK, cat)
 }
 
-// SearchScheduleAssignments handles POST /schedule/assignments/search.
+// SearchScheduleAssignments handles POST /team-schedule/assignments/search.
 func (h *ScheduleHandler) SearchScheduleAssignments(w http.ResponseWriter, r *http.Request) {
 	var req domain.SearchScheduleAssignmentsRequest
 	if !decodeRequest(w, r, &req) {
@@ -67,7 +67,7 @@ func (h *ScheduleHandler) SearchScheduleAssignments(w http.ResponseWriter, r *ht
 	writeScheduleJSON(w, http.StatusOK, resp)
 }
 
-// SearchScheduleAbsences handles POST /schedule/absences/search.
+// SearchScheduleAbsences handles POST /team-schedule/absences/search.
 func (h *ScheduleHandler) SearchScheduleAbsences(w http.ResponseWriter, r *http.Request) {
 	var req domain.SearchScheduleAbsencesRequest
 	if !decodeRequest(w, r, &req) {
@@ -81,7 +81,7 @@ func (h *ScheduleHandler) SearchScheduleAbsences(w http.ResponseWriter, r *http.
 	writeScheduleJSON(w, http.StatusOK, resp)
 }
 
-// GetScheduleOnDuty handles GET /schedule/on-duty[?at=RFC3339] -- who is
+// GetScheduleOnDuty handles GET /team-schedule/on-duty[?at=RFC3339] -- who is
 // responsible right now, or at the instant asked for.
 func (h *ScheduleHandler) GetScheduleOnDuty(w http.ResponseWriter, r *http.Request) {
 	var at *time.Time

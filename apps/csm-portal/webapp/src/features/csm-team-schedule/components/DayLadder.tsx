@@ -316,7 +316,10 @@ export default function DayLadder({
 
         <div className="tools">
           <span className="rng">
-            {dayLabel(day.toISOString(), tz)}
+            {/* `day` is a local calendar date, the one the rota was fetched for.
+                Converting it through the profile zone would name the day
+                before it for a reader whose profile is west of the browser. */}
+            {day.toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short", year: "numeric" })}
             {day.getDay() === 0 || day.getDay() === 6 ? " · weekend" : ""}
           </span>
           <select

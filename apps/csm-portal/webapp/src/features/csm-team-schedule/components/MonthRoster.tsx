@@ -509,7 +509,11 @@ export default function MonthRoster({
         </table>
       </div>
 
-      {rows.length === 0 ? <div className="offnone">No engineer matches “{query}”.</div> : null}
+      {rows.length === 0 ? (
+        <div className="offnone">
+          {q ? <>No engineer matches “{query}”.</> : "Nobody is on the rota this month."}
+        </div>
+      ) : null}
     </>
   );
 }

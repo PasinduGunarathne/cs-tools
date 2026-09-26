@@ -19,6 +19,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"time"
 
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/apierror"
@@ -41,15 +42,50 @@ type ScheduleService interface {
 	OnDuty(ctx context.Context, at *time.Time) (domain.ScheduleAssignmentsResponse, error)
 }
 
-type scheduleService struct{ repo repository.ScheduleRepository }
+type scheduleService struct {
+	repo   repository.ScheduleRepository
+	access AccessService
+}
 
 // NewScheduleService constructs a ScheduleService over the given repository.
-func NewScheduleService(repo repository.ScheduleRepository) ScheduleService {
-	return &scheduleService{repo: repo}
+func NewScheduleService(repo repository.ScheduleRepository, access AccessService) ScheduleService {
+	return &scheduleService{repo: repo, access: access}
+}
+
+// requireInternalCaller rejects anyone whose AccessScope is not Unrestricted.
+// The rota is staff data -- who is working, who is on leave and where -- and
+// belongs to no project, so there is no narrower scope a customer could be
+// given: an internal caller sees all of it and anyone else sees none. Mirrors
+// sla_status_service.go's helper of the same name.
+func (s *scheduleService) requireInternalCaller(ctx context.Context) error {
+	scope, err := s.access.ResolveScope(ctx)
+	if err != nil {
+		return err
+	}
+	if !scope.Unrestricted {
+		return &apierror.ForbiddenError{Msg: "the team schedule is only available to internal staff"}
+	}
+	return nil
 }
 
 func (s *scheduleService) Catalogue(ctx context.Context) (domain.ScheduleCatalogue, error) {
+	if err := s.requireInternalCaller(ctx); err != nil {
+		return domain.ScheduleCatalogue{}, err
+	}
 	return s.repo.Catalogue(ctx)
+}
+
+// uuidPattern is the canonical 8-4-4-4-12 form user ids are issued in.
+var uuidPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+
+// validateUserID refuses a userId that is not a UUID before it reaches a
+// uuid column, where Postgres would reject it as a 500 rather than the 400 a
+// malformed filter deserves. Empty means "no filter" and passes.
+func validateUserID(id string) error {
+	if id != "" && !uuidPattern.MatchString(id) {
+		return &apierror.ValidationError{Msg: fmt.Sprintf("userId %q is not a UUID", id)}
+	}
+	return nil
 }
 
 // parseWindow validates a from/to pair and returns it normalised. Both dates
@@ -77,7 +113,13 @@ func parseWindow(from, to string) (time.Time, time.Time, error) {
 }
 
 func (s *scheduleService) SearchAssignments(ctx context.Context, req domain.SearchScheduleAssignmentsRequest) (domain.ScheduleAssignmentsResponse, error) {
+	if err := s.requireInternalCaller(ctx); err != nil {
+		return domain.ScheduleAssignmentsResponse{}, err
+	}
 	if _, _, err := parseWindow(req.From, req.To); err != nil {
+		return domain.ScheduleAssignmentsResponse{}, err
+	}
+	if err := validateUserID(req.UserID); err != nil {
 		return domain.ScheduleAssignmentsResponse{}, err
 	}
 	if req.Family != "" && req.Family != "CRE" && req.Family != "SRE" {
@@ -91,7 +133,13 @@ func (s *scheduleService) SearchAssignments(ctx context.Context, req domain.Sear
 }
 
 func (s *scheduleService) SearchAbsences(ctx context.Context, req domain.SearchScheduleAbsencesRequest) (domain.ScheduleAbsencesResponse, error) {
+	if err := s.requireInternalCaller(ctx); err != nil {
+		return domain.ScheduleAbsencesResponse{}, err
+	}
 	if _, _, err := parseWindow(req.From, req.To); err != nil {
+		return domain.ScheduleAbsencesResponse{}, err
+	}
+	if err := validateUserID(req.UserID); err != nil {
 		return domain.ScheduleAbsencesResponse{}, err
 	}
 	rows, err := s.repo.SearchAbsences(ctx, req)
@@ -104,6 +152,9 @@ func (s *scheduleService) SearchAbsences(ctx context.Context, req domain.SearchS
 // OnDuty answers who is responsible at an instant, defaulting to now. This is
 // the lookup an alert escalation needs before it decides who to ring.
 func (s *scheduleService) OnDuty(ctx context.Context, at *time.Time) (domain.ScheduleAssignmentsResponse, error) {
+	if err := s.requireInternalCaller(ctx); err != nil {
+		return domain.ScheduleAssignmentsResponse{}, err
+	}
 	moment := time.Now()
 	if at != nil {
 		moment = *at

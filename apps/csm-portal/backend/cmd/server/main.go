@@ -319,10 +319,10 @@ func main() {
 	// rota is a lead's job and will need a permission of its own when the
 	// write routes land -- see the plan's Phase 2b.
 	scheduleHandler := handler.NewScheduleHandler(customerEntityClient)
-	route("GET /schedule/catalogue", handler.PermView, scheduleHandler.GetScheduleCatalogue)
-	route("POST /schedule/assignments/search", handler.PermView, scheduleHandler.SearchScheduleAssignments)
-	route("POST /schedule/absences/search", handler.PermView, scheduleHandler.SearchScheduleAbsences)
-	route("GET /schedule/on-duty", handler.PermView, scheduleHandler.GetScheduleOnDuty)
+	route("GET /team-schedule/catalogue", handler.PermView, scheduleHandler.GetScheduleCatalogue)
+	route("POST /team-schedule/assignments/search", handler.PermView, scheduleHandler.SearchScheduleAssignments)
+	route("POST /team-schedule/absences/search", handler.PermView, scheduleHandler.SearchScheduleAbsences)
+	route("GET /team-schedule/on-duty", handler.PermView, scheduleHandler.GetScheduleOnDuty)
 	route("POST /configuration-items/search", handler.PermView, configurationItemHandler.SearchConfigurationItems)
 	route("POST /time-cards/search", handler.PermTimeCardsAndUpdates, timeCardHandler.SearchTimeCards)
 	route("POST /time-cards", handler.PermTimeCardsAndUpdates, timeCardHandler.CreateTimeCard)

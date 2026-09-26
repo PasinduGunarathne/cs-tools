@@ -282,11 +282,13 @@ export default function CsmTeamSchedulePage(): JSX.Element {
       name: z.code,
       sub: z.label,
       colour: zoneColour(z.code),
-      assignments: rows.filter((a) => a.zoneCode === z.code),
+      // The same resolution the month roster uses: an assignment's own zone,
+      // else its window's, so a zoned window stored without one still lands.
+      assignments: rows.filter((a) => (a.zoneCode ?? shifts.get(a.shiftCode)?.zoneCode) === z.code),
       // Escalation on one side, everyone else in the zone on the other.
       layout: "zone" as const,
     }));
-  }, [family, rows, zonesOnDay]);
+  }, [family, rows, shifts, zonesOnDay]);
 
   if (catalogue.isError) {
     return <QueryErrorState message="Could not load the schedule catalogue." error={catalogue.error} />;

@@ -100,15 +100,55 @@ ON CONFLICT (id) DO NOTHING;
 
 -- ── the window we roster ──────────────────────────────────────────────────
 -- three weeks back and three weeks forward, so "my week", "this week" and
--- "next rotation" all have data whenever the stack is brought up
+-- "next rotation" all have data whenever the stack is brought up -- widened to
+-- the whole calendar month when that reaches further, so the month roster has
+-- no blank days at either end. n counts from the first day seeded, so it is
+-- never negative and the rotation modulos below stay in range.
 CREATE TEMP TABLE _day (d DATE, dow INT, is_weekend BOOLEAN, n INT) ON COMMIT DROP;
 INSERT INTO _day
 SELECT g::date, EXTRACT(isodow FROM g)::int, EXTRACT(isodow FROM g)::int > 5,
-       (g::date - (CURRENT_DATE - 21))::int
-FROM generate_series(CURRENT_DATE - 21, CURRENT_DATE + 21, interval '1 day') g;
+       (g::date - w.lo)::int
+FROM (SELECT LEAST(CURRENT_DATE - 21, date_trunc('month', CURRENT_DATE)::date) AS lo,
+             GREATEST(CURRENT_DATE + 21,
+                      (date_trunc('month', CURRENT_DATE) + interval '1 month - 1 day')::date) AS hi) w,
+     generate_series(w.lo, w.hi, interval '1 day') g;
 
 DELETE FROM schedule_assignment WHERE created_by = 'seed';
 DELETE FROM schedule_absence   WHERE created_by = 'seed';
+
+-- ── standing allocations, and who that leaves on the rota ────────────────
+-- Seeded ahead of the rotas, because they decide who the rotas draw from. The
+-- two groups do not draw from the same list.
+-- CRE carries migration work; SRE does not -- an SRE engineer is either on
+-- R&D or sitting with a customer, on site or off. Seeding migration against
+-- SRE would put a category in their off-rota column that does not exist for
+-- them.
+INSERT INTO schedule_absence (user_id, team_key, kind_id, starts_on, ends_on, note, created_by, updated_by)
+SELECT e.id, e.team_key, k.id, CURRENT_DATE - 60, NULL, 'standing allocation', 'seed', 'seed'
+FROM _eng e
+JOIN schedule_absence_kind k
+  ON k.code = CASE
+       WHEN e.family = 'sre-abt' THEN
+         CASE e.seq WHEN 5 THEN 'RND'
+                    WHEN 6 THEN 'CUSTOMER_ONSITE'
+                    ELSE 'CUSTOMER_OFFSITE' END
+       ELSE
+         CASE e.seq WHEN 5 THEN 'RND'
+                    WHEN 6 THEN 'CUSTOMER'
+                    ELSE 'MIGRATION' END
+     END
+WHERE e.seq IN (5, 6, 7);
+
+-- An engineer on a standing allocation is doing that work instead, so they
+-- are left out of every pool the rotas and regular hours draw from below --
+-- otherwise the same person reads as both off-rota and on shift. Leave is
+-- different: it is a few days, and the rotas simply run past it.
+CREATE TEMP TABLE _on_rota ON COMMIT DROP AS
+SELECT e.* FROM _eng e
+WHERE NOT EXISTS (
+    SELECT 1 FROM schedule_absence ab
+    JOIN schedule_absence_kind k ON k.id = ab.kind_id
+    WHERE ab.user_id = e.id AND ab.created_by = 'seed' AND k.bucket = 'ALLOCATION');
 
 -- resolve a window on a date, in the clock it was authored in
 CREATE OR REPLACE FUNCTION _seed_span(p_day DATE, p_code TEXT)
@@ -137,7 +177,7 @@ SELECT e.id, e.team_key,
        (count(*) OVER ())::int,
        (row_number() OVER (PARTITION BY e.team_key ORDER BY e.seq))::int,
        (count(*) OVER (PARTITION BY e.team_key))::int
-FROM _eng e JOIN _team t ON t.key = e.team_key
+FROM _on_rota e JOIN _team t ON t.key = e.team_key
 WHERE e.family = 'cre-abt';
 
 -- Morning 6-9am and the morning on-call: one engineer each, from any ABT.
@@ -199,7 +239,7 @@ INSERT INTO schedule_assignment
 SELECT e.id, md5('seed-team-americas')::uuid, 'americas', sp.shift_id, sp.zone_id, NULL,
        d.d, sp.starts_at, sp.ends_at, FALSE, 'GENERATED', 'seed', 'seed'
 FROM _day d
-JOIN _eng e ON e.team_key = 'americas'
+JOIN _on_rota e ON e.team_key = 'americas'
 CROSS JOIN LATERAL _seed_span(d.d, 'CRE_AMERICAS') sp
 WHERE NOT d.is_weekend
 ON CONFLICT DO NOTHING;
@@ -210,7 +250,7 @@ INSERT INTO _ame
 SELECT e.id,
        (row_number() OVER (ORDER BY e.seq))::int,
        (count(*) OVER ())::int
-FROM _eng e WHERE e.team_key = 'americas';
+FROM _on_rota e WHERE e.team_key = 'americas';
 
 INSERT INTO schedule_assignment
   (user_id, team_id, team_key, shift_id, zone_id, tier, rota_date, starts_at, ends_at, is_on_call, source, created_by, updated_by)
@@ -228,7 +268,7 @@ INSERT INTO _sre
 SELECT e.id, e.team_key,
        (row_number() OVER (PARTITION BY e.team_key ORDER BY e.seq))::int,
        (count(*) OVER (PARTITION BY e.team_key))::int
-FROM _eng e WHERE e.family = 'sre-abt';
+FROM _on_rota e WHERE e.family = 'sre-abt';
 
 INSERT INTO schedule_assignment
   (user_id, team_id, team_key, shift_id, zone_id, tier, rota_date, starts_at, ends_at, is_on_call, source, created_by, updated_by)
@@ -259,8 +299,8 @@ CROSS JOIN LATERAL _seed_span(d.d, v.code) sp
 WHERE d.is_weekend
 ON CONFLICT DO NOTHING;
 
--- ── leave and allocations ─────────────────────────────────────────────────
--- a few ranges, plus one standing allocation with no end date
+-- ── leave ─────────────────────────────────────────────────────────────────
+-- a few ranges; standing allocations were seeded above, before the rotas
 INSERT INTO schedule_absence (user_id, team_key, kind_id, starts_on, ends_on, note, created_by, updated_by)
 SELECT e.id, e.team_key, k.id,
        CURRENT_DATE + ((e.seq % 11) - 4), CURRENT_DATE + ((e.seq % 11) - 4) + 3,
@@ -268,27 +308,6 @@ SELECT e.id, e.team_key, k.id,
 FROM _eng e
 JOIN schedule_absence_kind k ON k.code = CASE WHEN e.seq % 2 = 0 THEN 'ANNUAL_LEAVE' ELSE 'LIEU_LEAVE' END
 WHERE e.seq IN (4, 9);
-
--- Standing allocations, and the two groups do not draw from the same list.
--- CRE carries migration work; SRE does not -- an SRE engineer is either on
--- R&D or sitting with a customer, on site or off. Seeding migration against
--- SRE would put a category in their off-rota column that does not exist for
--- them.
-INSERT INTO schedule_absence (user_id, team_key, kind_id, starts_on, ends_on, note, created_by, updated_by)
-SELECT e.id, e.team_key, k.id, CURRENT_DATE - 60, NULL, 'standing allocation', 'seed', 'seed'
-FROM _eng e
-JOIN schedule_absence_kind k
-  ON k.code = CASE
-       WHEN e.family = 'sre-abt' THEN
-         CASE e.seq WHEN 5 THEN 'RND'
-                    WHEN 6 THEN 'CUSTOMER_ONSITE'
-                    ELSE 'CUSTOMER_OFFSITE' END
-       ELSE
-         CASE e.seq WHEN 5 THEN 'RND'
-                    WHEN 6 THEN 'CUSTOMER'
-                    ELSE 'MIGRATION' END
-     END
-WHERE e.seq IN (5, 6, 7);
 
 -- ── everyone else works regular hours ─────────────────────────────────────
 -- stored, not derived: see the note at the top
@@ -301,7 +320,7 @@ SELECT e.id, md5('seed-team-'||e.team_key)::uuid, e.team_key, sp.shift_id,
        CASE WHEN e.family = 'sre-abt' THEN z.id ELSE sp.zone_id END, NULL,
        d.d, sp.starts_at, sp.ends_at, FALSE, 'GENERATED', 'seed', 'seed'
 FROM _day d
-JOIN _eng e ON TRUE
+JOIN _on_rota e ON TRUE
 CROSS JOIN LATERAL _seed_span(d.d, CASE WHEN e.family = 'sre-abt' THEN 'SRE_REGULAR' ELSE 'CRE_REGULAR' END) sp
 LEFT JOIN LATERAL (
     SELECT id FROM schedule_zone

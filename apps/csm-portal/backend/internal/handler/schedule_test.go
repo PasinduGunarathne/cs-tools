@@ -65,7 +65,7 @@ func (m *mockEntityScheduleClient) GetScheduleOnDuty(ctx context.Context, at str
 func TestSearchScheduleAssignments(t *testing.T) {
 	t.Run("requires an authenticated user", func(t *testing.T) {
 		h := NewScheduleHandler(&mockEntityScheduleClient{})
-		r := httptest.NewRequest(http.MethodPost, "/schedule/assignments/search", strings.NewReader(`{}`))
+		r := httptest.NewRequest(http.MethodPost, "/team-schedule/assignments/search", strings.NewReader(`{}`))
 		w := httptest.NewRecorder()
 		h.SearchScheduleAssignments(w, r)
 		assertStatus(t, w, http.StatusUnauthorized)
@@ -74,7 +74,7 @@ func TestSearchScheduleAssignments(t *testing.T) {
 
 	t.Run("rejects a body over the size limit", func(t *testing.T) {
 		h := NewScheduleHandler(&mockEntityScheduleClient{})
-		r := withUser(httptest.NewRequest(http.MethodPost, "/schedule/assignments/search",
+		r := withUser(httptest.NewRequest(http.MethodPost, "/team-schedule/assignments/search",
 			strings.NewReader(strings.Repeat("x", maxRequestBodyBytes+1))))
 		w := httptest.NewRecorder()
 		h.SearchScheduleAssignments(w, r)
@@ -83,7 +83,7 @@ func TestSearchScheduleAssignments(t *testing.T) {
 
 	t.Run("rejects a body that is not JSON", func(t *testing.T) {
 		h := NewScheduleHandler(&mockEntityScheduleClient{})
-		r := withUser(httptest.NewRequest(http.MethodPost, "/schedule/assignments/search",
+		r := withUser(httptest.NewRequest(http.MethodPost, "/team-schedule/assignments/search",
 			strings.NewReader(`not-json`)))
 		w := httptest.NewRecorder()
 		h.SearchScheduleAssignments(w, r)
@@ -101,7 +101,7 @@ func TestSearchScheduleAssignments(t *testing.T) {
 			},
 		}
 		h := NewScheduleHandler(client)
-		r := withUser(httptest.NewRequest(http.MethodPost, "/schedule/assignments/search", strings.NewReader(payload)))
+		r := withUser(httptest.NewRequest(http.MethodPost, "/team-schedule/assignments/search", strings.NewReader(payload)))
 		w := httptest.NewRecorder()
 		h.SearchScheduleAssignments(w, r)
 
@@ -122,7 +122,7 @@ func TestSearchScheduleAssignments(t *testing.T) {
 			},
 		}
 		h := NewScheduleHandler(client)
-		r := withUser(httptest.NewRequest(http.MethodPost, "/schedule/assignments/search", strings.NewReader(`{}`)))
+		r := withUser(httptest.NewRequest(http.MethodPost, "/team-schedule/assignments/search", strings.NewReader(`{}`)))
 		w := httptest.NewRecorder()
 		h.SearchScheduleAssignments(w, r)
 		if w.Code == http.StatusOK {
@@ -135,7 +135,7 @@ func TestGetScheduleCatalogue(t *testing.T) {
 	t.Run("requires an authenticated user", func(t *testing.T) {
 		h := NewScheduleHandler(&mockEntityScheduleClient{})
 		w := httptest.NewRecorder()
-		h.GetScheduleCatalogue(w, httptest.NewRequest(http.MethodGet, "/schedule/catalogue", nil))
+		h.GetScheduleCatalogue(w, httptest.NewRequest(http.MethodGet, "/team-schedule/catalogue", nil))
 		assertStatus(t, w, http.StatusUnauthorized)
 	})
 
@@ -146,7 +146,7 @@ func TestGetScheduleCatalogue(t *testing.T) {
 			},
 		})
 		w := httptest.NewRecorder()
-		h.GetScheduleCatalogue(w, withUser(httptest.NewRequest(http.MethodGet, "/schedule/catalogue", nil)))
+		h.GetScheduleCatalogue(w, withUser(httptest.NewRequest(http.MethodGet, "/team-schedule/catalogue", nil)))
 		assertStatus(t, w, http.StatusOK)
 		if !strings.Contains(w.Body.String(), "TZ1") {
 			t.Fatalf("catalogue did not reach the caller: %s", w.Body.String())
@@ -165,7 +165,7 @@ func TestGetScheduleOnDuty(t *testing.T) {
 		})
 		w := httptest.NewRecorder()
 		h.GetScheduleOnDuty(w, withUser(httptest.NewRequest(http.MethodGet,
-			"/schedule/on-duty?at=2026-09-21T22%3A15%3A00Z", nil)))
+			"/team-schedule/on-duty?at=2026-09-21T22%3A15%3A00Z", nil)))
 		assertStatus(t, w, http.StatusOK)
 		if gotAt != "2026-09-21T22:15:00Z" {
 			t.Fatalf("want the instant forwarded verbatim, got %q", gotAt)
@@ -181,7 +181,7 @@ func TestGetScheduleOnDuty(t *testing.T) {
 			},
 		})
 		w := httptest.NewRecorder()
-		h.GetScheduleOnDuty(w, withUser(httptest.NewRequest(http.MethodGet, "/schedule/on-duty", nil)))
+		h.GetScheduleOnDuty(w, withUser(httptest.NewRequest(http.MethodGet, "/team-schedule/on-duty", nil)))
 		assertStatus(t, w, http.StatusOK)
 		if gotAt != "" {
 			t.Fatalf("want an empty instant so the service defaults to now, got %q", gotAt)
@@ -198,7 +198,7 @@ func TestSearchScheduleAbsences(t *testing.T) {
 		})
 		w := httptest.NewRecorder()
 		h.SearchScheduleAbsences(w, withUser(httptest.NewRequest(http.MethodPost,
-			"/schedule/absences/search", strings.NewReader(`{"from":"2026-09-21","to":"2026-09-21"}`))))
+			"/team-schedule/absences/search", strings.NewReader(`{"from":"2026-09-21","to":"2026-09-21"}`))))
 		assertStatus(t, w, http.StatusOK)
 		if !strings.Contains(w.Body.String(), `"count":1`) {
 			t.Fatalf("upstream response did not reach the caller: %s", w.Body.String())
