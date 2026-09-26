@@ -201,8 +201,32 @@ func (r *scheduleRepository) SearchAssignments(ctx context.Context, req domain.S
 // alert escalation asks. Matched against the resolved window as a range, so
 // it is an index scan rather than a comparison over every row.
 func (r *scheduleRepository) OnDutyAt(ctx context.Context, at time.Time) ([]domain.ScheduleAssignment, error) {
+	// Somebody on leave is not on duty, whatever their assignment row says.
+	//
+	// The two facts are stored independently -- a rotation is generated weeks
+	// ahead, leave is granted against it afterwards -- so the assignment
+	// survives the absence and this query has to reconcile them. Without the
+	// exclusion, "who do I page right now" answers with someone on annual
+	// leave, which is the one thing it must never do.
+	//
+	// Every kind counts, not just leave. The catalogue's three buckets are
+	// LEAVE, ALLOCATION and EXCLUDED, and none of them describes somebody who
+	// is available: an allocation is work they are doing instead, and
+	// "excluded from rota" is the plainest case of all. Filtering by bucket
+	// would only reintroduce the bug for whichever bucket was left out.
+	//
+	// The span is closed at both ends because a leave day is a whole day, and
+	// it is compared against the date in the shift's own authoring zone: leave
+	// is granted as a calendar day by someone in that office, not as an
+	// instant.
 	rows, err := r.db.Query(ctx, `SELECT `+assignmentColumns+assignmentFrom+`
 		WHERE tstzrange(a.starts_at, a.ends_at, '[)') @> $1::timestamptz
+		  AND NOT EXISTS (
+		        SELECT 1 FROM schedule_absence ab
+		        WHERE ab.user_id = a.user_id
+		          AND daterange(ab.starts_on, ab.ends_on, '[]')
+		              @> ($1::timestamptz AT TIME ZONE s.authoring_time_zone)::date
+		      )
 		ORDER BY a.tier NULLS LAST, s.sort_order, u.name`, at)
 	if err != nil {
 		return nil, fmt.Errorf("query on-duty assignments: %w", err)
