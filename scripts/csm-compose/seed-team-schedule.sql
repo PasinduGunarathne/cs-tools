@@ -91,19 +91,34 @@ VALUES (md5('seed-manager-1')::uuid, now(), now(), 'seed', 'seed',
         'manager@example.com', TRUE, FALSE)
 ON CONFLICT (id) DO NOTHING;
 
--- Everyone seeded here is WSO2 staff, so give them the internal role.
+-- The engineers and the manager are WSO2 staff, so give them the internal role.
 --
 -- Not cosmetic: recompute_user_type() derives "user".user_type from a user's
--- roles, and the schedule endpoints admit only an unrestricted caller -- which
--- ResolveScope grants only to an INTERNAL user. Without this every seeded
--- engineer gets NOT_AVAILABLE and the rota answers 403 to the very people it
--- is for. The trigger recomputes on insert, so no explicit update is needed.
+-- roles, and the schedule endpoints admit only an unrestricted caller, which
+-- ResolveScope grants only to an INTERNAL user. Without this every engineer is
+-- NOT_AVAILABLE and the rota answers 403 to the people it is for.
+--
+-- Scoped to the rows THIS seed creates -- _eng and the manager -- and not to
+-- created_by = 'seed', which was the first attempt and was wrong. That also
+-- matches seed-entity-service.sql's users, one of whom is a customer. Granting
+-- internal on top of their customer role flips user_type to INTERNAL, because
+-- recompute_user_type() checks internal before external, and scopeForUser then
+-- hands that customer unrestricted scope over every project in the database.
+-- Raised in review; the blast radius is local-dev only, but the predicate was
+-- indefensible either way.
+--
+-- The delete first makes it self-healing: a volume that already took the wrong
+-- grant loses it on the next run rather than keeping it forever.
+DELETE FROM user_role
+ WHERE created_by = 'seed'
+   AND role_id = '00000000-0000-0000-0000-000000000101'::uuid
+   AND user_id NOT IN (SELECT id FROM _eng UNION ALL SELECT md5('seed-manager-1')::uuid);
+
 INSERT INTO user_role (id, created_on, updated_on, created_by, updated_by, user_id, role_id)
 SELECT md5('seed-ur-'||u.id::text)::uuid, now(), now(), 'seed', 'seed',
        u.id, '00000000-0000-0000-0000-000000000101'::uuid
-FROM "user" u
-WHERE u.created_by = 'seed'
-  AND NOT EXISTS (SELECT 1 FROM user_role ur
+FROM (SELECT id FROM _eng UNION ALL SELECT md5('seed-manager-1')::uuid) u
+WHERE NOT EXISTS (SELECT 1 FROM user_role ur
                    WHERE ur.user_id = u.id
                      AND ur.role_id = '00000000-0000-0000-0000-000000000101'::uuid)
 ON CONFLICT (id) DO NOTHING;

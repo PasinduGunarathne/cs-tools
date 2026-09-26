@@ -5360,6 +5360,15 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+        "404":
+          description: >
+            Not found — the schedule routes are registered only when a database
+            pool is configured, so an entity-service running without one has no
+            such path.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         "500":
           description: Unexpected error.
           content:
@@ -5397,6 +5406,15 @@ paths:
                 $ref: '#/components/schemas/ErrorResponse'
         "403":
           description: The caller is not internal staff — the rota is not available to customers.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "404":
+          description: >
+            Not found — the schedule routes are registered only when a database
+            pool is configured, so an entity-service running without one has no
+            such path.
           content:
             application/json:
               schema:

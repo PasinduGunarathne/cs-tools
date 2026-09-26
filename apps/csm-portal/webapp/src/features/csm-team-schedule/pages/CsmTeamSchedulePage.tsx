@@ -308,8 +308,14 @@ export default function CsmTeamSchedulePage(): JSX.Element {
               return (
               <button
                 key={t}
+                id={`ts-tab-${t}`}
                 className={`tab ${view === t ? "on" : ""}${off ? " off" : ""}`}
                 role="tab"
+                // The CSS class said which tab was active; nothing did for a
+                // screen reader, which read four equal buttons and a panel
+                // belonging to none of them.
+                aria-selected={view === t}
+                aria-controls="ts-panel"
                 disabled={off}
                 aria-disabled={off}
                 title={
@@ -445,7 +451,7 @@ export default function CsmTeamSchedulePage(): JSX.Element {
           isLoading={upcoming.isLoading}
         />
 
-        <div className="card">
+        <div className="card" id="ts-panel" role="tabpanel" aria-labelledby={`ts-tab-${view}`}>
           {assignments.isError ? (
             <QueryErrorState message="Could not load the rota." error={assignments.error} />
           ) : busy ? (
