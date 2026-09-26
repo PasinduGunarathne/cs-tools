@@ -581,6 +581,35 @@ func (c *CustomerEntityClient) SearchGroups(ctx context.Context, body []byte) ([
 	return c.do(ctx, http.MethodPost, "/groups/search", body)
 }
 
+// GetScheduleCatalogue calls GET /schedule/catalogue on the entity service.
+// The Team Schedule zones, windows and absence kinds, in one payload: a client
+// needs all three to draw a single day. Response is returned as raw JSON.
+func (c *CustomerEntityClient) GetScheduleCatalogue(ctx context.Context) ([]byte, error) {
+	return c.do(ctx, http.MethodGet, "/schedule/catalogue", nil)
+}
+
+// SearchScheduleAssignments calls POST /schedule/assignments/search on the
+// entity service. Response is returned as raw JSON.
+func (c *CustomerEntityClient) SearchScheduleAssignments(ctx context.Context, body []byte) ([]byte, error) {
+	return c.do(ctx, http.MethodPost, "/schedule/assignments/search", body)
+}
+
+// SearchScheduleAbsences calls POST /schedule/absences/search on the entity
+// service. Response is returned as raw JSON.
+func (c *CustomerEntityClient) SearchScheduleAbsences(ctx context.Context, body []byte) ([]byte, error) {
+	return c.do(ctx, http.MethodPost, "/schedule/absences/search", body)
+}
+
+// GetScheduleOnDuty calls GET /schedule/on-duty on the entity service, passing
+// the optional `at` instant through unchanged. Response is raw JSON.
+func (c *CustomerEntityClient) GetScheduleOnDuty(ctx context.Context, at string) ([]byte, error) {
+	path := "/schedule/on-duty"
+	if at != "" {
+		path += "?at=" + url.QueryEscape(at)
+	}
+	return c.do(ctx, http.MethodGet, path, nil)
+}
+
 // SearchConfigurationItems calls POST /configuration-items/search on the entity service.
 // Response is returned as raw JSON.
 func (c *CustomerEntityClient) SearchConfigurationItems(ctx context.Context, body []byte) ([]byte, error) {

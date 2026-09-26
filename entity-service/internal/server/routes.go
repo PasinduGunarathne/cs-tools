@@ -288,6 +288,10 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, func()) {
 	// Constructed further below (once activeCaseSvc exists), not here —
 	// AutoPublish needs it for its own in-process case-creation fan-out.
 	var announcementRequestHandler *handler.AnnouncementRequestHandler
+	// Team Schedule is portal-native, like announcement_requests: it exists
+	// only in Postgres, so its routes are registered only when a pool is
+	// configured.
+	var scheduleHandler *handler.ScheduleHandler
 
 	accountRepo := repository.NewAccountRepository(db)
 	accountHandler := handler.NewAccountHandler(service.NewAccountService(accountRepo))
@@ -655,6 +659,9 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, func()) {
 		announcementRequestHandler = handler.NewAnnouncementRequestHandler(
 			service.NewAnnouncementRequestService(repository.NewAnnouncementRequestRepository(db), activeCaseSvc, accessSvc),
 		)
+		scheduleHandler = handler.NewScheduleHandler(
+			service.NewScheduleService(repository.NewScheduleRepository(db)),
+		)
 	}
 	// activeAttachmentSvc backs the case-attachment routes registered below
 	// (POST/GET/PATCH/DELETE /attachments...) — see caseAttachmentOverrideSvc's
@@ -1020,6 +1027,12 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, func()) {
 	if alertIncidentMappingHandler != nil {
 		mux.HandleFunc("POST /alert-incident-mappings", alertIncidentMappingHandler.CreateAlertIncidentMapping)
 		mux.HandleFunc("POST /alert-incident-mappings/lookup", alertIncidentMappingHandler.LookupAlertIncidentMappings)
+	}
+	if scheduleHandler != nil {
+		mux.HandleFunc("GET /schedule/catalogue", scheduleHandler.GetScheduleCatalogue)
+		mux.HandleFunc("POST /schedule/assignments/search", scheduleHandler.SearchScheduleAssignments)
+		mux.HandleFunc("POST /schedule/absences/search", scheduleHandler.SearchScheduleAbsences)
+		mux.HandleFunc("GET /schedule/on-duty", scheduleHandler.GetScheduleOnDuty)
 	}
 	if announcementRequestHandler != nil {
 		mux.HandleFunc("POST /announcement-requests", announcementRequestHandler.CreateAnnouncementRequest)
