@@ -52,9 +52,12 @@ type ScheduleShift struct {
 	AuthoringTimeZone string  `json:"authoringTimeZone"`
 	IsOnCall          bool    `json:"isOnCall"`
 	IsEscalation      bool    `json:"isEscalation"`
-	CrossesMidnight   bool    `json:"crossesMidnight"`
-	ColourToken       string  `json:"colourToken"`
-	SortOrder         int     `json:"sortOrder"`
+	// IsRotation is false for a window that is simply when a team works --
+	// regular hours, or the Americas night -- rather than a turn on the rota.
+	IsRotation      bool   `json:"isRotation"`
+	CrossesMidnight bool   `json:"crossesMidnight"`
+	ColourToken     string `json:"colourToken"`
+	SortOrder       int    `json:"sortOrder"`
 }
 
 // ScheduleAbsenceKind is a reason someone is out of the rota. A table rather

@@ -18,7 +18,7 @@
 
 import { useEffect, useMemo, useState, type JSX } from "react";
 import type { ScheduleAssignment, ScheduleShift } from "../types";
-import { dayLabel, isRotationShift, timeOf } from "../utils/rota";
+import { dayLabel, isRotationShift, partsInZone, timeOf } from "../utils/rota";
 
 interface NextRotationProps {
   /** The signed-in engineer's own rota, from today forward. */
@@ -31,14 +31,22 @@ interface NextRotationProps {
   isLoading: boolean;
 }
 
-/** Whole days between two instants, by calendar day rather than by 24h --
- *  something starting at 21:00 tonight is "today", not "in 0.9 days". */
-function daysUntil(iso: string, nowMs: number): number {
-  const then = new Date(iso);
-  const a = new Date(then.getFullYear(), then.getMonth(), then.getDate());
-  const now = new Date(nowMs);
-  const b = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  return Math.round((a.getTime() - b.getTime()) / 86_400_000);
+/**
+ * Whole days between two instants, by calendar day rather than by 24h --
+ * something starting at 21:00 tonight is "today", not "in 0.9 days".
+ *
+ * Counted in the reader's profile zone, not the browser's. Those are routinely
+ * different here -- the whole page is built on the profile being the one clock
+ * -- and reading the calendar day off the browser made "in 2 days" disagree
+ * with the date printed beside it: a rotation starting 00:30 on the 27th in
+ * Colombo is still the 26th to a machine set to Los Angeles.
+ */
+function daysUntil(iso: string, nowMs: number, tz: string): number {
+  const day = (at: string): number => {
+    const [y, m, d] = partsInZone(at, tz).date.split("-").map(Number);
+    return Date.UTC(y, m - 1, d);
+  };
+  return Math.round((day(iso) - day(new Date(nowMs).toISOString())) / 86_400_000);
 }
 
 function whenWord(days: number): string {
@@ -112,7 +120,7 @@ export default function NextRotation({
   }
 
   const shift = shifts.get(next.shiftCode);
-  const days = daysUntil(next.startsAt, now);
+  const days = daysUntil(next.startsAt, now, tz);
   const running = Date.parse(next.startsAt) <= now;
 
   return (

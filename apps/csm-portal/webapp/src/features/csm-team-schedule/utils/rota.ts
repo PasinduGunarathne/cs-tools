@@ -250,7 +250,7 @@ export function initialsOf(name: string): string {
  */
 export function isRotationShift(shift: ScheduleShift | undefined): boolean {
   if (!shift) return false;
-  return !shift.code.includes("REGULAR");
+  return shift.isRotation;
 }
 
 /**
@@ -263,6 +263,5 @@ export function isRotationShift(shift: ScheduleShift | undefined): boolean {
  * rota with them.
  */
 export function isPeerRotation(shift: ScheduleShift | undefined): boolean {
-  if (!isRotationShift(shift)) return false;
-  return shift!.code !== "CRE_AMERICAS";
+  return isRotationShift(shift);
 }

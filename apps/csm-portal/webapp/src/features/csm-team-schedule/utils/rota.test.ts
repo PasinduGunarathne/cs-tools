@@ -47,7 +47,7 @@ function nightBlock(): ScheduleAssignment {
   };
 }
 
-const shift = (code: string): ScheduleShift => ({
+const shift = (code: string, isRotation = true): ScheduleShift => ({
   id: code,
   code,
   shortCode: code,
@@ -59,6 +59,7 @@ const shift = (code: string): ScheduleShift => ({
   authoringTimeZone: IST,
   isOnCall: false,
   isEscalation: false,
+  isRotation,
   crossesMidnight: false,
   colourToken: "LK",
   sortOrder: 1,
@@ -162,9 +163,9 @@ describe("isRotationShift", () => {
   it("counts a rotation but not ordinary working hours", () => {
     expect(isRotationShift(shift("CRE_EVENING"))).toBe(true);
     expect(isRotationShift(shift("SRE_TZ1_L1"))).toBe(true);
-    expect(isRotationShift(shift("CRE_REGULAR"))).toBe(false);
-    expect(isRotationShift(shift("CRE_REGULAR_IND"))).toBe(false);
-    expect(isRotationShift(shift("SRE_REGULAR"))).toBe(false);
+    expect(isRotationShift(shift("CRE_REGULAR", false))).toBe(false);
+    expect(isRotationShift(shift("CRE_REGULAR_IND", false))).toBe(false);
+    expect(isRotationShift(shift("SRE_REGULAR", false))).toBe(false);
     expect(isRotationShift(undefined)).toBe(false);
   });
 });
@@ -188,8 +189,8 @@ describe("isPeerRotation", () => {
     // turn in the ABT rotation, so they are not "on with" a CRE engineer.
     expect(isPeerRotation(shift("CRE_EVENING"))).toBe(true);
     expect(isPeerRotation(shift("CRE_MORNING_OC"))).toBe(true);
-    expect(isPeerRotation(shift("CRE_AMERICAS"))).toBe(false);
-    expect(isPeerRotation(shift("CRE_REGULAR"))).toBe(false);
+    expect(isPeerRotation(shift("CRE_AMERICAS", false))).toBe(false);
+    expect(isPeerRotation(shift("CRE_REGULAR", false))).toBe(false);
   });
 });
 

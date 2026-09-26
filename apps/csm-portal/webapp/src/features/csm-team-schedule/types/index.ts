@@ -45,6 +45,9 @@ export interface ScheduleShift {
   authoringTimeZone: string;
   isOnCall: boolean;
   isEscalation: boolean;
+  /** False for a window that is simply when a team works -- regular hours,
+   *  or the Americas night -- rather than a turn on the rota. */
+  isRotation: boolean;
   crossesMidnight: boolean;
   colourToken: string;
   sortOrder: number;
