@@ -91,6 +91,23 @@ VALUES (md5('seed-manager-1')::uuid, now(), now(), 'seed', 'seed',
         'manager@example.com', TRUE, FALSE)
 ON CONFLICT (id) DO NOTHING;
 
+-- Everyone seeded here is WSO2 staff, so give them the internal role.
+--
+-- Not cosmetic: recompute_user_type() derives "user".user_type from a user's
+-- roles, and the schedule endpoints admit only an unrestricted caller -- which
+-- ResolveScope grants only to an INTERNAL user. Without this every seeded
+-- engineer gets NOT_AVAILABLE and the rota answers 403 to the very people it
+-- is for. The trigger recomputes on insert, so no explicit update is needed.
+INSERT INTO user_role (id, created_on, updated_on, created_by, updated_by, user_id, role_id)
+SELECT md5('seed-ur-'||u.id::text)::uuid, now(), now(), 'seed', 'seed',
+       u.id, '00000000-0000-0000-0000-000000000101'::uuid
+FROM "user" u
+WHERE u.created_by = 'seed'
+  AND NOT EXISTS (SELECT 1 FROM user_role ur
+                   WHERE ur.user_id = u.id
+                     AND ur.role_id = '00000000-0000-0000-0000-000000000101'::uuid)
+ON CONFLICT (id) DO NOTHING;
+
 INSERT INTO team_member (id, created_on, updated_on, created_by, updated_by, team_id, user_id, role)
 SELECT md5('seed-tm-'||e.team_key||'-'||e.seq)::uuid, now(), now(), 'seed', 'seed',
        md5('seed-team-'||e.team_key)::uuid, e.id,
