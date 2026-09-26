@@ -46,7 +46,14 @@ func NewScheduleRepository(db *pgxpool.Pool) ScheduleRepository {
 // the same struct is how scan bugs get in.
 const assignmentColumns = `
     a.id, u.id, COALESCE(u.name, ''), COALESCE(u.email, ''),
-    COALESCE(tm.role = 'lead', FALSE),
+    -- Lead-ness is looked up rather than joined, because schedule_assignment.team_id
+    -- is nullable and routinely absent for a registry-only team. A LEFT JOIN on it
+    -- silently returned FALSE for a real lead -- no error, just a missing badge.
+    -- With no team on the row, any lead membership the engineer holds counts;
+    -- with one, only that team's. bool_or keeps it a single row either way.
+    COALESCE((SELECT bool_or(tm2.role = 'lead') FROM team_member tm2
+               WHERE tm2.user_id = a.user_id
+                 AND (a.team_id IS NULL OR tm2.team_id = a.team_id)), FALSE),
     a.team_key, s.code, z.code, a.tier::text, a.rota_date,
     a.starts_at, a.ends_at, a.is_on_call, a.source::text, a.note`
 
@@ -54,8 +61,7 @@ const assignmentFrom = `
   FROM schedule_assignment a
   JOIN "user" u          ON u.id = a.user_id
   JOIN schedule_shift s  ON s.id = a.shift_id
-  LEFT JOIN schedule_zone z ON z.id = a.zone_id
-  LEFT JOIN team_member tm  ON tm.user_id = a.user_id AND tm.team_id = a.team_id`
+  LEFT JOIN schedule_zone z ON z.id = a.zone_id`
 
 func scanAssignments(rows interface {
 	Next() bool
@@ -115,7 +121,7 @@ func (r *scheduleRepository) Catalogue(ctx context.Context) (domain.ScheduleCata
 	shiftRows, err := r.db.Query(ctx, `
 		SELECT s.id, s.code, s.short_code, s.label, s.family::text, z.code, s.tier::text,
 		       s.day_scope::text, s.start_minute, s.end_minute, s.authoring_time_zone,
-		       s.is_on_call, s.is_escalation, s.crosses_midnight, s.colour_token, s.sort_order
+		       s.is_on_call, s.is_escalation, s.is_rotation, s.crosses_midnight, s.colour_token, s.sort_order
 		FROM schedule_shift s
 		LEFT JOIN schedule_zone z ON z.id = s.zone_id
 		WHERE s.is_active ORDER BY s.family, s.sort_order`)
@@ -127,7 +133,7 @@ func (r *scheduleRepository) Catalogue(ctx context.Context) (domain.ScheduleCata
 		var s domain.ScheduleShift
 		if err := shiftRows.Scan(&s.ID, &s.Code, &s.ShortCode, &s.Label, &s.Family, &s.ZoneCode, &s.Tier,
 			&s.DayScope, &s.StartMinute, &s.EndMinute, &s.AuthoringTimeZone,
-			&s.IsOnCall, &s.IsEscalation, &s.CrossesMidnight, &s.ColourToken, &s.SortOrder); err != nil {
+			&s.IsOnCall, &s.IsEscalation, &s.IsRotation, &s.CrossesMidnight, &s.ColourToken, &s.SortOrder); err != nil {
 			return cat, fmt.Errorf("scan schedule shift: %w", err)
 		}
 		cat.Shifts = append(cat.Shifts, s)
@@ -168,8 +174,16 @@ func (r *scheduleRepository) SearchAssignments(ctx context.Context, req domain.S
 	args := []any{req.From, req.To}
 	where := `WHERE a.rota_date BETWEEN $1::date AND $2::date`
 	if req.IncludeOvernight {
+		// The boundary is midnight in the shift's own office, not in the
+		// database session's zone. `$1::date::timestamptz` resolves against
+		// the session -- UTC in every deployment of this service -- so a
+		// Colombo-authored block ending 00:30 IST (19:00Z the day before) was
+		// not > the UTC midnight of the day it plainly runs into, and dropped
+		// out of that day's view. Every other date boundary in this feature
+		// already goes through authoring_time_zone; this one did not.
 		where = `WHERE (a.rota_date BETWEEN $1::date AND $2::date
-		          OR (a.rota_date < $1::date AND a.ends_at > $1::date::timestamptz))`
+		          OR (a.rota_date < $1::date
+		              AND a.ends_at > ($1::date::timestamp AT TIME ZONE s.authoring_time_zone)))`
 	}
 	if len(req.TeamKeys) > 0 {
 		args = append(args, req.TeamKeys)
