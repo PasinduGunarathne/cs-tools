@@ -774,7 +774,15 @@ func listCalls(ctx context.Context, client *http.Client, base, acct, token, to s
 // shared with every other ladder, rescanned on every tick, with nothing able
 // to reclaim them. Scanning means this works from either half alone.
 func retireLadder(ctx context.Context, store *escalation.Store, incidentID string) error {
-	if err := store.RemoveWakes(ctx, wakeMembersFor(ctx, store, incidentID)...); err != nil {
+	// Deleting the state before the wakes are gone strands them: the entries
+	// live in an index shared with every other ladder, and nothing can
+	// reclaim one whose state no longer exists. So a failed scan has to stop
+	// this, not be treated as "no entries found".
+	members, err := wakeMembersFor(ctx, store, incidentID)
+	if err != nil {
+		return err
+	}
+	if err := store.RemoveWakes(ctx, members...); err != nil {
 		return err
 	}
 	return store.Delete(ctx, incidentID)
@@ -785,10 +793,10 @@ func retireLadder(ctx context.Context, store *escalation.Store, incidentID strin
 // "Due arbitrarily far in the future" is how the whole index is read: the
 // store exposes a due-by query, and a decade ahead covers every entry it
 // could hold.
-func wakeMembersFor(ctx context.Context, store *escalation.Store, incidentID string) []string {
+func wakeMembersFor(ctx context.Context, store *escalation.Store, incidentID string) ([]string, error) {
 	members, err := store.DueMembers(ctx, time.Now().AddDate(10, 0, 0))
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	prefix := incidentID + "|"
 	var mine []string
@@ -797,7 +805,7 @@ func wakeMembersFor(ctx context.Context, store *escalation.Store, incidentID str
 			mine = append(mine, m)
 		}
 	}
-	return mine
+	return mine, nil
 }
 
 // cleanupLocalLadders retires every ladder this tool has ever left behind —

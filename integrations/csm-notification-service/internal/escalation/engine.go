@@ -80,14 +80,22 @@ type EngineConfig struct {
 // whatever calls have come due. Neither knows the timing rules, which live
 // entirely in policy.go and plan.go.
 type Engine struct {
-	policies map[string]PriorityPolicy
-	resolver Resolver
+	policies        map[string]PriorityPolicy
+	resolver        Resolver
 	// notifiers is how a rung reaches people, one per selected channel. The
 	// ladder's rules know nothing about which are in play.
-	notifiers []notifier
-	store     ladderStore
-	notes     incidentNotes
-	cfg       EngineConfig
+	notifiers       []notifier
+	// missingChannels names every channel cfg.Channel selected that has no
+	// client to serve it. Recorded rather than rejected: a deployment asking
+	// for both channels with only one client configured should still page
+	// people over the one it has, and refusing to construct would take the
+	// working half down with the broken one. But it must not be silent --
+	// a ladder that posts no chat card while an operator believes it does is
+	// precisely the failure this exists to surface.
+	missingChannels []Channel
+	store           ladderStore
+	notes           incidentNotes
+	cfg             EngineConfig
 	// clock is time.Now unless a test substitutes one; the staleness check
 	// in start is the only thing that reads it, and it has to be testable
 	// against a trigger that is genuinely old.
@@ -115,23 +123,40 @@ func NewEngine(policies map[string]PriorityPolicy, resolver Resolver, calls *not
 	if notes != nil {
 		e.notes = notes
 	}
-	if cfg.Channel.Uses(ChannelCall) && calls != nil {
-		e.notifiers = append(e.notifiers, voiceNotifier{calls: calls, useSSML: cfg.UseSSML})
-	}
-	if cfg.Channel.Uses(ChannelChat) && chat != nil {
-		// links goes in only when it is really there, for the same reason
-		// notes does above and with the same trap: assigning a nil
-		// *recipientlinks.Resolver straight into the incidentLinker field
-		// stores a non-nil interface holding a nil pointer, so the nil check
-		// inside Deliver passes and IncidentLink is called on a nil receiver.
-		// That is a panic in the middle of paging someone, and it is exactly
-		// the mistake the notes parameter already documents — made twice in
-		// one constructor before a real run caught it.
-		n := chatNotifier{chat: chat, defaultProduct: defaultChatProduct}
-		if links != nil {
-			n.links = links
+	if cfg.Channel.Uses(ChannelCall) {
+		if calls == nil {
+			e.missingChannels = append(e.missingChannels, ChannelCall)
+		} else {
+			e.notifiers = append(e.notifiers, voiceNotifier{calls: calls, useSSML: cfg.UseSSML})
 		}
-		e.notifiers = append(e.notifiers, n)
+	}
+	if cfg.Channel.Uses(ChannelChat) {
+		if chat == nil {
+			e.missingChannels = append(e.missingChannels, ChannelChat)
+		} else {
+			// links goes in only when it is really there, for the same reason
+			// notes does above and with the same trap: assigning a nil
+			// *recipientlinks.Resolver straight into the incidentLinker field
+			// stores a non-nil interface holding a nil pointer, so the nil check
+			// inside Deliver passes and IncidentLink is called on a nil receiver.
+			// That is a panic in the middle of paging someone, and it is exactly
+			// the mistake the notes parameter already documents — made twice in
+			// one constructor before a real run caught it.
+			n := chatNotifier{chat: chat, defaultProduct: defaultChatProduct}
+			if links != nil {
+				n.links = links
+			}
+			e.notifiers = append(e.notifiers, n)
+		}
+	}
+	// Logged here rather than per attempt: this is a deployment mistake, it
+	// cannot change while the process runs, and one line at startup is
+	// actionable where one line per rung is noise. place() still reports the
+	// case where nothing at all is configured, because that one reaches
+	// nobody.
+	for _, ch := range e.missingChannels {
+		slog.Error("escalation: configured for a channel with no client; nothing will be sent over it",
+			"missingChannel", string(ch), "configuredChannel", string(cfg.Channel))
 	}
 	return e
 }

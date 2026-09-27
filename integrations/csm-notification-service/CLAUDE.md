@@ -150,8 +150,7 @@ second.
 turns a vendor alert (Azure, Grafana, Site24x7, OpenSearch) into a platform
 incident through that same `POST /incidents`, so an alert-born incident is
 exactly what the `incident.*` events describe, and the call-escalation ladder
-below escalates it like any other. There is no separate SRE entity to tell it
-apart from.
+below escalates it like any other. There is no separate SRE entity.
 
 ## Incident call escalation
 

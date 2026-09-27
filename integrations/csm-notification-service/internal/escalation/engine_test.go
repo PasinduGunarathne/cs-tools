@@ -710,6 +710,32 @@ func TestNewEngine_NilNotesClientDoesNotPanic(t *testing.T) {
 	}
 }
 
+// A deployment that asks for both channels but configures only one still
+// pages people over the one it has -- and says, once, that the other is going
+// nowhere. Silently dropping the unserved channel is the failure this guards:
+// a ladder that posts no chat card while an operator believes it does looks
+// identical to one that worked.
+func TestNewEngine_RecordsSelectedChannelWithNoClient(t *testing.T) {
+	cfg := enabled()
+	cfg.Channel = ChannelBoth
+
+	e := NewEngine(DefaultPolicy, fullResolver(), nil, &notifications.GoogleChatClient{},
+		nil, nil, nil, "", cfg)
+
+	if len(e.notifiers) != 1 {
+		t.Fatalf("notifiers = %d, want the one channel that has a client", len(e.notifiers))
+	}
+	if len(e.missingChannels) != 1 || e.missingChannels[0] != ChannelCall {
+		t.Errorf("missingChannels = %v, want [%s]", e.missingChannels, ChannelCall)
+	}
+
+	// The mirror image: chat selected with no chat client.
+	e = NewEngine(DefaultPolicy, fullResolver(), nil, nil, nil, nil, nil, "", cfg)
+	if len(e.missingChannels) != 2 {
+		t.Errorf("missingChannels = %v, want both channels reported", e.missingChannels)
+	}
+}
+
 // The work note must report what was dialled, not what was scheduled.
 //
 // A cancellation and a call due at the same instant race, and the
