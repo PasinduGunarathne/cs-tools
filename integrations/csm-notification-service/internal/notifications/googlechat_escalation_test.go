@@ -27,7 +27,7 @@ import (
 
 func sampleAlert() EscalationAlert {
 	return EscalationAlert{
-		Product: "WSO2 API Manager", Rung: "LEVEL_2", RungRole: "ABT or sub team leads",
+		Product: "WSO2 API Manager", Rung: "LEVEL_2", RungRole: "ABT lead",
 		Attempt: 1, Priority: "P1", IncidentRef: "INC0012345",
 		Title: "Gateway returning 500s in production", RecipientName: "Siluni Perera",
 		Instruction: "Update the ticket status to Work In Progress to stop further notifications.",
@@ -75,7 +75,7 @@ func TestEscalationCard_Level0IsNotAnEscalation(t *testing.T) {
 func TestEscalationCard_Body(t *testing.T) {
 	body := buildEscalationCard(sampleAlert()).CardsV2[0].Card.Sections[0].Widgets[0].TextParagraph.Text
 	for _, want := range []string{
-		"ABT or sub team leads",
+		"ABT lead",
 		"Siluni Perera",
 		"Priority P1",
 		"unattended 18m",

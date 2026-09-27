@@ -58,26 +58,40 @@ import (
 type Level int
 
 // The specification names these rungs twice, in two vocabularies, and they are
-// the same five rungs either way — section 3.0 and the section 5.0 rule table
-// name them by role, section 7.0's timing table by position:
+// the same five rungs either way. Section 7.0's timing table names them by
+// position and is the vocabulary that survived; section 3.0's role names did
+// not, because they describe an org shape WSO2 does not actually have.
 //
-//	LEVEL_0  Rotation Lead / Rotation Members     (§7.0: "Rotation Lead/Member")
-//	LEVEL_1  ABT Leads / Sub Leads                (§7.0: "Sub Team Lead")
-//	LEVEL_2  ABT Team Leads / Sub Team Leads      (§7.0: "Team Lead")
-//	LEVEL_3  Head of Business Unit                (§7.0: "Head of BU")
-//	LEVEL_4  Head of Customer Success             (§7.0: "Head of CRE")
+// WHO EACH RUNG IS, as confirmed by the CS team on 2026-09-27. This supersedes
+// section 3.0's wording, which spoke of business units and sub teams:
 //
-// Both names are given below because a reader coming from either half of the
-// document should recognise the rung. The "Common/All ... Pool" variants in
-// rules R3, R4, R7, R8, R13 and R14 are not extra rungs: they are the same
-// LEVEL_1 and LEVEL_2 resolved to a shift-wide pool instead of one team,
-// which is a Resolver concern (see resolver.go), not a change to this ladder.
+//	LEVEL_0  the sub lead rostered on the rotation covering that moment
+//	LEVEL_1  the case's ABT's three sub leads, called together
+//	LEVEL_2  that ABT's one lead, who sits above those three
+//	LEVEL_3  CRE head, a director
+//	LEVEL_4  CS head, a VP
+//
+// An ABT has no sub teams. LEVEL_1 and LEVEL_2 differ by role inside one flat
+// team, not by team, so both resolve from the ABT named on the case; the split
+// is seniority. A sub lead is deliberately rostered on every rotation, morning,
+// evening, weekend and Americas cover alike, so LEVEL_0 always resolves and
+// needs no marker of its own on the assignment.
+//
+// LEVEL_0 and LEVEL_1 may reach the same person, when the rostered sub lead
+// happens to belong to the case's own ABT. They are deliberately NOT
+// de-duplicated: a second call is another chance for the one person already
+// closest to the incident to stop the ladder.
+//
+// The "Common/All ... Pool" variants in rules R3, R4, R7, R8, R13 and R14 are
+// not extra rungs: they are the same LEVEL_1 and LEVEL_2 resolved to a
+// shift-wide pool instead of one team, which is a Resolver concern (see
+// resolver.go), not a change to this ladder.
 const (
-	Level0 Level = iota // rotation lead / rotation members — rotations only
-	Level1              // ABT leads / sub leads
-	Level2              // ABT team leads / sub team leads
-	Level3              // head of business unit
-	Level4              // head of customer success (head of CRE)
+	Level0 Level = iota // the sub lead on the covering rotation
+	Level1              // the case's ABT's three sub leads
+	Level2              // that ABT's one lead
+	Level3              // CRE head, a director
+	Level4              // CS head, a VP
 )
 
 // String renders the level the way the specification's own execution summary
@@ -89,8 +103,7 @@ func (l Level) String() string {
 	return fmt.Sprintf("LEVEL_%d", int(l))
 }
 
-// Role names who a rung is, in the vocabulary section 3.0 and the section 5.0
-// rule table use. String gives the position (LEVEL_2); this gives the people
+// Role names who a rung is, in the vocabulary the CS team uses. String gives the position (LEVEL_2); this gives the people
 // (ABT team leads), which is what a reader in a chat space needs to know to
 // tell whether the escalation has reached them.
 //
@@ -101,15 +114,15 @@ func (l Level) String() string {
 func (l Level) Role() string {
 	switch l {
 	case Level0:
-		return "Rotation lead or members"
+		return "On-call sub lead"
 	case Level1:
-		return "ABT or sub leads"
+		return "ABT sub leads"
 	case Level2:
-		return "ABT or sub team leads"
+		return "ABT lead"
 	case Level3:
-		return "Head of business unit"
+		return "CRE head"
 	case Level4:
-		return "Head of customer success"
+		return "CS head"
 	}
 	return "Unknown rung"
 }
