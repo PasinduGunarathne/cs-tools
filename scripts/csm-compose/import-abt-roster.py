@@ -78,7 +78,13 @@ ABSENCES = {
     "ll": ("LIEU_LEAVE", None),
     "l": ("LIEU_LEAVE", None),  # one cell in 2026; LL with the second L missing
     "sl": ("SICK_LEAVE", None),
-    "ml": ("MATERNITY_LEAVE", None),
+    # ML on the sheet is Medical Leave, which this vocabulary calls sick
+    # leave -- 000096 created both and 000098 merged medical into sick
+    # deliberately. It is not maternity: MATERNITY_LEAVE only took the short
+    # code ML later, in 000107, once medical had freed it, and matching the
+    # sheet's code against a short code rather than a meaning is what put
+    # engineers on maternity leave for a day off sick.
+    "ml": ("SICK_LEAVE", None),
     "pl": ("PATERNITY_LEAVE", None),
     "mig": ("MIGRATION", None),
     # Lent to the Migration team from their ABT: away from the ABT's rota
@@ -106,6 +112,11 @@ CANONICAL_TEAM_KEYS = {
 
 CUSTOMER_PREFIX = "allo-"
 CUSTOMER_KIND = "CUSTOMER_OFFSITE"
+
+# What follows Allo- when it names the Brazil rotation rather than a customer.
+# tokens() has already stripped the spaces and lowercased by this point, so
+# "Allo-BR Rotation" arrives as "allo-brrotation".
+BRAZIL_ROTATION = re.compile(r"(br|brazil|brasil)(rotation|rota)?")
 
 # Kinds whose span may run across a weekend with nothing written on it. An
 # allocation or an exclusion does not stop for a Saturday; leave does -- a
@@ -240,6 +251,17 @@ def main(xlsx, sheet, out_path):
                 elif code in ABSENCES:
                     kind, to = ABSENCES[code]
                     days_by_person[mail].setdefault(d, (key, []))[1].append((kind, to))
+                elif code.startswith(CUSTOMER_PREFIX) and BRAZIL_ROTATION.fullmatch(
+                    code[len(CUSTOMER_PREFIX):]
+                ):
+                    # Brazil is a rotation the team takes a turn at, not a
+                    # customer somebody is allocated to. Only the exact
+                    # 'Allo-BR' reached ABSENCES above, so every other way the
+                    # sheet writes it -- Allo-Brazil, Allo-BR Rotation, which
+                    # loses its space in tokens() -- fell through to the
+                    # customer branch and became an off-site allocation to a
+                    # customer named Brazil.
+                    days_by_person[mail].setdefault(d, (key, []))[1].append(("ALLO_BR", None))
                 elif code.startswith(CUSTOMER_PREFIX):
                     # From the original cell, so 'Allo-Acme' keeps the casing
                     # the sheet wrote -- but matched against THIS code, not the
