@@ -106,6 +106,14 @@ type snIncidentFilters struct {
 	Number string `json:"number,omitempty"`
 	// StateKeys: see domain.SearchIncidentsFilters.StateKeys doc comment.
 	StateKeys []int `json:"stateKeys,omitempty"`
+	// IncidentStateKeys: see domain.SearchIncidentsFilters Filters
+	// "incidentStateKeys" doc comment. nil/empty (omitted) means the filter
+	// was not supplied. Deliberately kept separate from StateKeys above --
+	// this filters ServiceNow's raw `incident_state` field, a distinct field
+	// that exists independently of the OOB `state` field on the same
+	// incident row; carried through only for exact parity with SN's native
+	// incident dashboards.
+	IncidentStateKeys []int `json:"incidentStateKeys,omitempty"`
 	// AssignmentGroupIDs: sys_user_group sys_ids (converted from UUIDs).
 	AssignmentGroupIDs []string `json:"assignmentGroupIds,omitempty"`
 	// BusinessServiceIDs: business_service sys_ids (converted from UUIDs).
@@ -286,6 +294,7 @@ func (s *snIncidentService) SearchIncidents(ctx context.Context, req domain.Sear
 			ParentIDs:          uuidsToSysids(req.Filters.ParentIDs),
 			Number:             stringPtrValue(req.Filters.Number),
 			StateKeys:          parsedFilters.StateKeys,
+			IncidentStateKeys:  snIncidentStateKeysFromStrings(parsedFilters.IncidentStateKeys),
 			AssignmentGroupIDs: uuidsToSysids(parsedFilters.AssignmentGroupIDs),
 			BusinessServiceIDs: uuidsToSysids(parsedFilters.BusinessServiceIDs),
 			StartCreatedDate:   formatSNDateTimeUTC(parsedFilters.StartCreatedDate),
@@ -432,6 +441,7 @@ func (s *snIncidentService) AggregateIncidents(ctx context.Context, req domain.A
 			ParentIDs:          uuidsToSysids(req.Filters.ParentIDs),
 			Number:             stringPtrValue(req.Filters.Number),
 			StateKeys:          parsedFilters.StateKeys,
+			IncidentStateKeys:  snIncidentStateKeysFromStrings(parsedFilters.IncidentStateKeys),
 			AssignmentGroupIDs: uuidsToSysids(parsedFilters.AssignmentGroupIDs),
 			BusinessServiceIDs: uuidsToSysids(parsedFilters.BusinessServiceIDs),
 			StartCreatedDate:   formatSNDateTimeUTC(parsedFilters.StartCreatedDate),
@@ -862,7 +872,41 @@ func (s *snIncidentService) CreateIncident(ctx context.Context, req domain.Creat
 // Any failure is logged and does not fail CreateIncident itself: the
 // incident already exists in ServiceNow by this point.
 func (s *snIncidentService) publishIncidentCreated(ctx context.Context, req domain.CreateIncidentRequest, incidentID, number, createdOn string) {
-	if s.publisher == nil {
+	publishIncidentCreatedEvent(ctx, s.publisher, req, incidentID, number, createdOn, s.GetIncidentByID)
+}
+
+// incidentViewFetcher reads the incident back for the escalation fields
+// neither the create request nor its response carries: ServiceNow derives
+// priority from impact and urgency, and the assigned team arrives as a sys_id.
+// Both data sources have one to give. nil is allowed and is not an error --
+// the event then goes out with exactly the fields it carried before the
+// ladder existed, the same outcome the fetch's own failure path produces.
+type incidentViewFetcher func(ctx context.Context, id string) (domain.IncidentView, error)
+
+// fetchIncidentView applies fetch when there is one. A nil fetcher is reported
+// as an error so the caller's existing "publish without escalation fields"
+// branch handles both cases identically.
+func fetchIncidentView(ctx context.Context, fetch incidentViewFetcher, id string) (domain.IncidentView, error) {
+	if fetch == nil {
+		return domain.IncidentView{}, fmt.Errorf("no incident view fetcher configured")
+	}
+	return fetch(ctx, id)
+}
+
+// publishIncidentCreatedEvent is publishIncidentCreated's actual body,
+// factored out to a package-level function so
+// incidentService.createIncidentSNFirst (DATA_SOURCE=postgres-servicenow-dual-write)
+// can call it too, AFTER its own Postgres insert succeeds, rather than
+// relying on snIncidentService's own automatic publish -- which fires right
+// after the ServiceNow POST returns, before that Postgres insert has even
+// been attempted. A consumer could otherwise receive incident.created for an
+// incident the Postgres-backed read API (the only one live in this mode)
+// cannot yet, or ever, return -- CodeRabbit correctly flagged this on PR
+// #1922. publisher may be nil (e.g. the dual-write mirror instance is
+// constructed with publisher=nil specifically so its own CreateIncident
+// never double-publishes -- see routes.go's incident DataSource wiring).
+func publishIncidentCreatedEvent(ctx context.Context, publisher EventPublisherService, req domain.CreateIncidentRequest, incidentID, number, createdOn string, fetch incidentViewFetcher) {
+	if publisher == nil {
 		return
 	}
 	ctx, cancel := context.WithTimeout(ctx, publishIncidentCreatedTimeout)
@@ -879,7 +923,7 @@ func (s *snIncidentService) publishIncidentCreated(ctx context.Context, req doma
 		Number:           number,
 		ReportedAt:       snTimeToRFC3339(ctx, "sn create incident", "createdOn", createdOn),
 	}
-	if view, verr := s.GetIncidentByID(ctx, incidentID); verr == nil {
+	if view, verr := fetchIncidentView(ctx, fetch, incidentID); verr == nil {
 		if view.Priority != nil {
 			event.Priority = *view.Priority
 		}
@@ -904,7 +948,7 @@ func (s *snIncidentService) publishIncidentCreated(ctx context.Context, req doma
 		slog.ErrorContext(ctx, "sn create incident: encode incident.created payload failed", "incidentId", incidentID, "error", err)
 		return
 	}
-	if err := s.publisher.Publish(ctx, events.TypeIncidentCreated, incidentID, payload); err != nil {
+	if err := publisher.Publish(ctx, events.TypeIncidentCreated, incidentID, payload); err != nil {
 		// Not logging err itself: it can carry a raw Event Hub client error
 		// (potentially including connection/broker details), and this
 		// service's own convention is to log only ids and sanitised

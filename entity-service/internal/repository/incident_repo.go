@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/apierror"
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/domain"
@@ -51,17 +52,22 @@ import (
 //
 // See incidentStateToEnum/incidentPriorityToEnum for both mappings.
 //
-// CreateIncident/UpdateIncident/HandOffIncidentToSpecialist have no
-// Postgres implementation: CreateIncident needs work_item.number, which has
-// no DB default or backing sequence anywhere in migrations/ (same blocker
-// as CaseRepository.CreateCase); UpdateIncident touches several fields with
-// no backing column at all (AssignmentGroupID, ConfigurationItemID,
-// WatchList) alongside ones that do, and would need comment-table side
-// effects for AdditionalComments/WorkNotes -- deferred as a unit rather than
-// half-implemented; HandOffIncidentToSpecialist is an inherently
-// ServiceNow-workflow-specific feature (moves the incident to a specialist
-// group, opens a task, files a GitHub issue) with nothing in this schema to
-// derive an equivalent from.
+// CreateIncident (the plain, non-SN-first path)/UpdateIncident/
+// HandOffIncidentToSpecialist have no Postgres implementation: CreateIncident
+// needs work_item.number, which has no DB default or backing sequence
+// anywhere in migrations/ (same blocker as CaseRepository.CreateCase);
+// UpdateIncident touches several fields with no backing column at all
+// (AssignmentGroupID, ConfigurationItemID, WatchList) alongside ones that do,
+// and would need comment-table side effects for AdditionalComments/WorkNotes
+// -- deferred as a unit rather than half-implemented;
+// HandOffIncidentToSpecialist is an inherently ServiceNow-workflow-specific
+// feature (moves the incident to a specialist group, opens a task, files a
+// GitHub issue) with nothing in this schema to derive an equivalent from.
+//
+// CreateIncidentFromServiceNow (below) is the exception, same as
+// CaseRepository.CreateCaseFromServiceNow: it backs
+// DATA_SOURCE=postgres-servicenow-dual-write's SN-first incident creation,
+// where identity comes from ServiceNow rather than being generated here.
 type IncidentRepository interface {
 	// SearchIncidents returns a filtered, sorted, paginated slice of
 	// incidents together with the total count of matching rows before
@@ -80,6 +86,62 @@ type IncidentRepository interface {
 	// SearchIncidentActivities returns a paginated activity feed for an
 	// incident (comments + field changes), newest first.
 	SearchIncidentActivities(ctx context.Context, req domain.SearchIncidentActivitiesRequest) ([]domain.CaseActivity, int, error)
+	// CreateIncidentComment inserts a new comment row for the given incident
+	// -- WorkNotes/AdditionalComments side effect of UpdateIncident's
+	// DATA_SOURCE=postgres-servicenow-dual-write path (see
+	// incidentService.UpdateIncident's own doc comment). Mirrors
+	// CaseRepository.CreateCaseComment's INSERT-with-existence-check shape,
+	// but scoped to the "incident" subtype table specifically rather than
+	// the generic "work_item" table -- unlike CreateCaseComment (whose own
+	// doc comment explains why it deliberately checks against work_item,
+	// not "case": one comment endpoint backs five different case-like
+	// types), this method backs incidents alone, so scoping the existence
+	// check to "incident" is strictly more specific with no coverage loss,
+	// matching SearchIncidentActivities' own existence check against the
+	// "incident" table rather than "work_item". commentType must be
+	// CommentTypeWorkNote or CommentTypeComment -- every other
+	// domain.CommentType value (including CommentTypeActivity, which is
+	// never writer-authored) is rejected with a ValidationError before any
+	// query runs. Returns a ValidationError, not a raw FK error, when
+	// incidentID does not identify an existing incident. createdBy is the
+	// resolved actor's email -- comment.created_by is a free-text VARCHAR,
+	// not a UUID FK, matching CreateCaseComment's own convention (see that
+	// method's doc comment), so the caller (incidentService.UpdateIncident)
+	// resolves the actor and passes the email straight through.
+	CreateIncidentComment(ctx context.Context, incidentID string, commentType domain.CommentType, content, createdBy string) (domain.CaseComment, error)
+	// CreateIncidentFromServiceNow inserts a new incident row (both work_item
+	// and "incident"), for DATA_SOURCE=postgres-servicenow-dual-write's SN-first
+	// incident creation (see incidentService.createIncidentSNFirst's own doc
+	// comment). Unlike CaseRepository.CreateCaseFromServiceNow, no wso2ID
+	// parameter exists here: work_item.wso2_id is only required (by the
+	// work_item_wso2_id_required_by_type CHECK constraint, migration 000016)
+	// for CASE/SERVICE_REQUEST/ANNOUNCEMENT/ENGAGEMENT/
+	// SECURITY_REPORT_ANALYSIS -- INCIDENT is deliberately excluded from that
+	// list, and ServiceNow's own incident-create response
+	// (snCreateIncidentResponse) has no equivalent field to supply one from
+	// anyway. id/number/createdBy are exactly what ServiceNow already
+	// returned for the incident it just created. id must be a canonical UUID
+	// (sysidToUUID(sn sys_id), the same identity convention every
+	// DataSource=servicenow response already uses). Returns a
+	// ValidationError if id is not a valid UUID or if a row already exists
+	// for id/number (unique violation) -- the latter should not happen in
+	// practice since ServiceNow only just generated these, but is reported
+	// precisely rather than as an opaque infrastructure error if it ever
+	// does.
+	//
+	// Only fields with an unambiguous, already-established column/enum
+	// mapping are written: req.Subcategory is deliberately NOT resolved to
+	// incident_subcategory.id here -- that table's value column uses
+	// ServiceNow's own free-text choice-list spelling (e.g. "ip address",
+	// "DOS/ DDOS"), which has no established mapping back from
+	// domain.IncidentSubcategory's enum spelling (e.g. IP_ADDRESS,
+	// DOS_DDOS) anywhere in this codebase yet -- same class of gap as
+	// incidentWhereClause's already-documented assignmentGroupId/productName
+	// "accepted but not applied" fields. req.ConfigurationItemID and
+	// req.AssignmentGroupID are also not applied, for the same
+	// no-backing-column reason UpdateIncident's own doc comment already
+	// gives.
+	CreateIncidentFromServiceNow(ctx context.Context, req domain.CreateIncidentRequest, id, number, createdBy string) (domain.CreateIncidentResponse, error)
 }
 
 type incidentRepo struct {
@@ -483,7 +545,7 @@ func (r *incidentRepo) GetIncidentByID(ctx context.Context, id string) (domain.I
 // scanCaseActivity's exact query/column shape (case_repo.go) -- an activity
 // feed entry (comment or field change) is not inherently case-specific, and
 // work_item_activity/comment are both keyed by the generic work_item_id.
-// There are no incident attachments table equivalent to case_attachments
+// There are no incident attachments table equivalent to case_attachment
 // (that table is case-specific by name and FK), so this feed never has an
 // "attachment" kind entry, unlike SearchCaseActivities.
 func (r *incidentRepo) SearchIncidentActivities(ctx context.Context, req domain.SearchIncidentActivitiesRequest) ([]domain.CaseActivity, int, error) {
@@ -595,4 +657,151 @@ func (r *incidentRepo) SearchIncidentActivities(ctx context.Context, req domain.
 	}
 
 	return activity, total, nil
+}
+
+// incidentContactTypeToEnum maps domain.IncidentContactType to
+// incident_contact_type_enum's real labels (migration 000058) -- identity
+// for every value except "Site 24/7", where the enum spells it
+// 'SITE_24_7' but domain.IncidentContactTypeSite247 spells it "SITE_247".
+func incidentContactTypeToEnum(c domain.IncidentContactType) string {
+	if c == domain.IncidentContactTypeSite247 {
+		return "SITE_24_7"
+	}
+	return string(c)
+}
+
+// createIncidentCommentQuery mirrors createCaseCommentQuery's (case_repo.go,
+// inline in CreateCaseComment) INSERT ... SELECT shape: the SELECT's WHERE
+// confirms the referenced row exists in the same round trip, RETURNING zero
+// rows (not a hard-to-attribute FK error) when it doesn't. Joins against
+// "incident" specifically, not the generic "work_item" table -- see
+// CreateIncidentComment's own doc comment (in the IncidentRepository
+// interface, above) for why that's safe and correct here even though
+// CreateCaseComment itself deliberately checks the broader work_item table
+// instead.
+const createIncidentCommentQuery = `
+	INSERT INTO comment (id, created_on, created_by, type, work_item_id, content)
+	SELECT gen_random_uuid(), NOW(), $1, $2::comment_type_enum, i.id, $4
+	FROM incident i
+	WHERE i.id = $3
+	RETURNING id, work_item_id, type, content, created_by, created_on`
+
+// CreateIncidentComment implements IncidentRepository.
+func (r *incidentRepo) CreateIncidentComment(ctx context.Context, incidentID string, commentType domain.CommentType, content, createdBy string) (domain.CaseComment, error) {
+	// CommentTypeActivity is never writer-authored (same restriction
+	// CreateCaseComment enforces) -- and this method's only real caller
+	// (UpdateIncident's WorkNotes/AdditionalComments branches) never passes
+	// anything else, but the guard stays here rather than relying solely on
+	// the service layer, matching CreateCaseComment's own defense-in-depth.
+	if commentType == domain.CommentTypeActivity {
+		return domain.CaseComment{}, &apierror.ValidationError{Msg: `type "activity" is not writable through this endpoint`}
+	}
+	typeEnum, ok := caseCommentTypeEnum[commentType]
+	if !ok {
+		return domain.CaseComment{}, &apierror.ValidationError{Msg: "type contains invalid value: " + string(commentType)}
+	}
+
+	var c domain.CaseComment
+	var typeRaw, createdByEmail string
+	err := r.db.QueryRow(ctx, createIncidentCommentQuery,
+		createdBy, typeEnum, incidentID, content,
+	).Scan(&c.ID, &c.CaseID, &typeRaw, &c.Content, &createdByEmail, &c.CreatedOn)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return domain.CaseComment{}, &apierror.ValidationError{Msg: "incident not found: " + incidentID}
+	}
+	if err != nil {
+		return domain.CaseComment{}, fmt.Errorf("create incident comment: %w", err)
+	}
+	c.Type = caseCommentEnumType[typeRaw]
+	c.CreatedBy = domain.NewUserReference("", createdByEmail, "")
+	return c, nil
+}
+
+// createIncidentFromServiceNowQuery inserts both halves of an incident row
+// (work_item + incident, the same shared-primary-key pattern
+// createCaseFromServiceNowQuery documents) in one round trip via a CTE,
+// using caller-supplied identity (id/number/createdBy) rather than
+// generating any of it -- see CreateIncidentFromServiceNow's own doc comment
+// for why, and for which req fields are deliberately left unwritten.
+// type is hardcoded to 'INCIDENT'::work_item_type_enum. incident.state is
+// left to its own column default ('NEW') -- reliably parsing ServiceNow's
+// raw create-response state label back into incident_state_enum would need
+// a label lookup this service doesn't have for incident (unlike case's
+// hardcoded 'OPEN', a freshly created ServiceNow incident's state is not
+// knowable as a single constant the way case's is), and the schema default
+// already matches the correct freshly-created value.
+//
+// Column/output order matches the trailing SELECT exactly.
+const createIncidentFromServiceNowQuery = `
+	WITH inserted_work_item AS (
+		INSERT INTO work_item (
+			id, created_on, updated_on, created_by, updated_by,
+			number, subject, type, parent_id
+		)
+		VALUES (
+			$1, NOW(), NOW(), $2, $2,
+			$3, $4, 'INCIDENT'::work_item_type_enum, $5::uuid
+		)
+		RETURNING id, number, subject, created_on, updated_on, created_by
+	),
+	inserted_incident AS (
+		INSERT INTO incident (
+			id, caller_id, category, impact, urgency,
+			service_id, service_offering_id, contact_type,
+			change_request_id, caused_by_id, parent_incident_id, problem_id,
+			opened_on
+		)
+		VALUES (
+			$1, $6::uuid, $7::incident_category_enum, $8::incident_impact_enum, $9::incident_urgency_enum,
+			$10::uuid, $11::uuid, $12::incident_contact_type_enum,
+			$13::uuid, $14::uuid, $15::uuid, $16::uuid,
+			NOW()
+		)
+		RETURNING id
+	)
+	SELECT iwi.id, iwi.number, iwi.subject, iwi.created_on, iwi.updated_on, iwi.created_by
+	FROM inserted_work_item iwi
+	JOIN inserted_incident ii ON ii.id = iwi.id`
+
+// CreateIncidentFromServiceNow implements IncidentRepository.
+func (r *incidentRepo) CreateIncidentFromServiceNow(ctx context.Context, req domain.CreateIncidentRequest, id, number, createdBy string) (domain.CreateIncidentResponse, error) {
+	var contactType *string
+	if req.ContactType != nil {
+		v := incidentContactTypeToEnum(*req.ContactType)
+		contactType = &v
+	}
+
+	var (
+		outID, outNumber, outSubject, outCreatedBy string
+		outCreatedOn, outUpdatedOn                 time.Time
+	)
+	err := r.db.QueryRow(ctx, createIncidentFromServiceNowQuery,
+		id, createdBy,
+		number, req.Subject, req.ParentID,
+		req.CallerID, string(req.Category), string(req.Impact), string(req.Urgency),
+		req.ServiceID, req.ServiceOfferingID, contactType,
+		req.ChangeRequestID, req.CausedByID, req.ParentIncidentID, req.ProblemID,
+	).Scan(&outID, &outNumber, &outSubject, &outCreatedOn, &outUpdatedOn, &outCreatedBy)
+	if err != nil {
+		if pgErr := (*pgconn.PgError)(nil); errors.As(err, &pgErr) {
+			switch pgErr.Code {
+			case "23505": // unique_violation on id/number -- see this method's own doc comment for why this "shouldn't" happen
+				return domain.CreateIncidentResponse{}, &apierror.ConflictError{Msg: "an incident already exists for this ServiceNow id/number: " + pgErr.Detail}
+			case "22P02": // invalid_text_representation -- id (or another uuid-typed field) was not a valid UUID
+				return domain.CreateIncidentResponse{}, &apierror.ValidationError{Msg: "id is not a valid UUID: " + id}
+			case "23503": // foreign_key_violation -- one of the referenced IDs does not exist
+				return domain.CreateIncidentResponse{}, &apierror.ValidationError{Msg: "one or more referenced IDs do not exist: " + pgErr.Detail}
+			case "P0001": // raise_exception from integrity triggers
+				return domain.CreateIncidentResponse{}, &apierror.ValidationError{Msg: pgErr.Message}
+			}
+		}
+		return domain.CreateIncidentResponse{}, fmt.Errorf("create incident from servicenow: %w", err)
+	}
+
+	resp := domain.CreateIncidentResponse{Message: "Incident created successfully."}
+	resp.Incident.ID = outID
+	resp.Incident.Number = outNumber
+	resp.Incident.CreatedOn = outCreatedOn.UTC().Format(time.RFC3339)
+	resp.Incident.CreatedBy = outCreatedBy
+	return resp, nil
 }

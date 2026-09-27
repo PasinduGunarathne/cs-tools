@@ -18,12 +18,15 @@ package repository
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/apierror"
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/domain"
@@ -39,22 +42,57 @@ type DeployedProductRepository interface {
 	SearchDeployedProducts(ctx context.Context, req domain.SearchDeployedProductsRequest) ([]domain.DeployedProductView, int, error)
 
 	// SearchDeployedProductMetrics returns per-day CORES readings (from
-	// usage_count, migration 000054) for every deployment_node resolved to
+	// hourly_usage_summary, migration 000054) for every deployment_node resolved to
 	// the given deployed product and deployment. A NotFoundError is returned
 	// if the deployed product doesn't exist or isn't linked to deploymentID.
 	SearchDeployedProductMetrics(ctx context.Context, id, deploymentID, startDate, endDate string) (domain.DeployedProductMetricsResponse, error)
 
 	// SearchDeployedProductUsageCounts is the same resolution as
-	// SearchDeployedProductMetrics, but returns every usage_count.count_type
+	// SearchDeployedProductMetrics, but returns every hourly_usage_summary.count_type
 	// found for the resolved instances, not just CORES.
 	SearchDeployedProductUsageCounts(ctx context.Context, id, deploymentID, startDate, endDate string) (domain.DeployedProductUsageCountsResponse, error)
+
+	// SearchProjectsByProductVersion returns the deduplicated, paginated set
+	// of projects with a deployed_product on the given product+version,
+	// joining deployed_product directly to project (migration 000014's
+	// project_id FK) rather than going through deployment the way
+	// SearchDeployedProducts does -- there's no deployment-name/id to
+	// display here, only the owning project. excludeClosureStates/
+	// excludeSubscriptionTypes are the caller's fixed, non-optional
+	// exclusion policy (mandatoryExcludeClosureStates/
+	// mandatoryExcludeSubscriptionTypes in sn_deployed_product_service.go,
+	// mirrored here for parity with that data source) -- not a
+	// caller-supplied filter, so they're separate parameters rather than
+	// part of domain.SearchProjectsByProductVersionRequest. COUNT and SELECT
+	// are executed concurrently on separate pool connections, same as
+	// SearchProjects/SearchDeployedProducts.
+	SearchProjectsByProductVersion(ctx context.Context, req domain.SearchProjectsByProductVersionRequest, excludeClosureStates []string, excludeSubscriptionTypes []domain.SubscriptionType) ([]domain.EntityRef, int, error)
+
+	// CreateDeployedProductFromServiceNow inserts a deployed_product row
+	// using identity (id/number) ServiceNow has already assigned -- see
+	// deployedProductService.createDeployedProductSNFirst's own doc comment
+	// for why: deployed_product.number is NOT NULL UNIQUE and Postgres has no
+	// generator for it, the same unresolved problem deployment.number had
+	// before CreateDeploymentFromServiceNow.
+	CreateDeployedProductFromServiceNow(ctx context.Context, req domain.CreateDeployedProductRequest, id, number, createdBy string, createdOn time.Time) (domain.CreatedDeployedProduct, error)
+
+	// UpdateDeployedProductFields applies a Postgres-side update for the same
+	// field group UpdateDeployedProductRequest itself enforces (detail
+	// fields XOR Active=false) -- called on the dual-write data source's
+	// Postgres-first leg; the ServiceNow mirror runs separately and
+	// asynchronously. When req.DeploymentID is set, the update is
+	// additionally scoped to a row whose deployment_id matches it (the same
+	// IDOR guard snDeployedProductService.UpdateDeployedProduct enforces via
+	// a live search) -- a mismatch is indistinguishable from "not found" and
+	// returns the same NotFoundError.
+	UpdateDeployedProductFields(ctx context.Context, req domain.UpdateDeployedProductRequest, updatedBy string) (domain.UpdatedDeployedProduct, error)
 }
 
 // resolveDeployedProductNodes looks up the given deployed product, confirms
 // it belongs to deploymentID, and returns the deployment_node rows
 // (id, node_id) resolved to it -- see instanceRefJoins' own doc comment in
-// instance_repo.go for why this resolution (deployment_ref cast to uuid) is
-// a best-effort join, unverified against real data.
+// instance_repo.go for how a node is matched to a deployment (by project key and
+// deployment number, only within the same project).
 func (r *deployedProductRepo) resolveDeployedProductNodes(ctx context.Context, id, deploymentID string) (domain.ReferenceTableItem, []domain.ReferenceTableItem, error) {
 	var name, number *string
 	var dpDeploymentID, versionID *string
@@ -88,11 +126,10 @@ func (r *deployedProductRepo) resolveDeployedProductNodes(ctx context.Context, i
 	rows, err := r.db.Query(ctx, `
 		SELECT dn.id, dn.node_id
 		FROM deployment_node dn
+		JOIN project proj ON proj.key = dn.project_key
+		JOIN deployment dep ON dep.number = dn.deployment_number AND dep.project_id = proj.id
 		WHERE dn.product_version_id = $1
-		AND CASE
-			WHEN dn.deployment_ref ~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
-			THEN dn.deployment_ref::uuid
-		END = $2::uuid`,
+		AND dep.id = $2::uuid`,
 		*versionID, deploymentID,
 	)
 	if err != nil {
@@ -137,7 +174,7 @@ func (r *deployedProductRepo) SearchDeployedProductMetrics(ctx context.Context, 
 
 	rows, err := r.db.Query(ctx, `
 		SELECT uc.counted_on::date, uc.deployment_node_id, uc.count
-		FROM usage_count uc
+		FROM hourly_usage_summary uc
 		WHERE uc.deployment_node_id = ANY($1::uuid[])
 		AND uc.count_type = 'CORES'
 		AND uc.counted_on::date BETWEEN $2::date AND $3::date
@@ -245,7 +282,7 @@ func (r *deployedProductRepo) SearchDeployedProductUsageCounts(ctx context.Conte
 
 	rows, err := r.db.Query(ctx, `
 		SELECT uc.counted_on::date, uc.count_type, uc.deployment_node_id, uc.count
-		FROM usage_count uc
+		FROM hourly_usage_summary uc
 		WHERE uc.deployment_node_id = ANY($1::uuid[])
 		AND uc.counted_on::date BETWEEN $2::date AND $3::date
 		ORDER BY uc.counted_on::date, uc.count_type`,
@@ -443,4 +480,291 @@ func (r *deployedProductRepo) SearchDeployedProducts(ctx context.Context, req do
 	}
 
 	return deployedProducts, total, nil
+}
+
+// SearchProjectsByProductVersion implements DeployedProductRepository.
+// productID/productVersionID are validated as UUIDs by the caller
+// (deployedProductService.SearchProjectsByProductVersion) before reaching
+// here, and are always passed as query parameters ($1/$2 below), never
+// interpolated into the SQL string -- same discipline as every other filter
+// in this file.
+func (r *deployedProductRepo) SearchProjectsByProductVersion(ctx context.Context, req domain.SearchProjectsByProductVersionRequest, excludeClosureStates []string, excludeSubscriptionTypes []domain.SubscriptionType) ([]domain.EntityRef, int, error) {
+	filterArgs := []any{req.ProductID, req.ProductVersionID}
+	argIdx := 3
+
+	// Mandatory, unconditional (not gated on a caller-supplied slice, unlike
+	// the two exclusions below): a project whose subscription contract has
+	// ended (end_date in the past) is treated as inaccessible by the
+	// customer portal itself (isProjectSuspended in
+	// apps/customer-portal/webapp/src/utils/permission.ts, which checks
+	// end_date independently of wso2_closure_state — a project's closure
+	// state is frequently left NULL when its subscription simply expired
+	// rather than being explicitly marked Restricted/Suspended). An EOL
+	// announcement audience must not include a project the customer portal
+	// itself already blocks the customer from viewing. end_date is a plain
+	// DATE column (no time-of-day); the cutoff is the last millisecond of
+	// that day (end_date + 1 day - 1ms), not simply "the next UTC day",
+	// so this matches apps/customer-portal/webapp/src/utils/permission.ts's
+	// own isProjectContractEnded (end-of-day UTC, strictly after) and
+	// isProjectContractEnded in sn_project_service.go to the millisecond —
+	// a plain date-vs-date comparison here would exclude the project one
+	// millisecond later than both of those (only at the next day's exact
+	// midnight instead of 23:59:59.999 on end_date's own day), a real,
+	// if practically negligible, inconsistency between the ServiceNow and
+	// Postgres cohorts a reviewer flagged. Both sides of the comparison are
+	// plain "timestamp without time zone" (NOW() AT TIME ZONE 'UTC' yields
+	// the current UTC wall-clock reading in that type), so this needs no
+	// timezone-conversion assumption the way comparing a timestamptz
+	// directly against a bare "date + interval" would.
+	where := "WHERE dp.product_id = $1 AND dp.version_id = $2" +
+		" AND (proj.end_date IS NULL OR proj.end_date + INTERVAL '1 day' - INTERVAL '1 millisecond' >= (NOW() AT TIME ZONE 'UTC'))"
+
+	// Same NULL-permissive, upper-cased-vocabulary matching as
+	// ProjectRepository.SearchProjects' ExcludeClosureStates clause -- see
+	// that clause's own doc comment for why. This is the mandatory
+	// exclusion policy, not a caller-supplied filter, so excludeClosureStates
+	// is only ever the fixed mandatoryExcludeClosureStates slice.
+	if len(excludeClosureStates) > 0 {
+		upper := make([]string, len(excludeClosureStates))
+		for i, s := range excludeClosureStates {
+			upper[i] = strings.ToUpper(s)
+		}
+		where += fmt.Sprintf(" AND (proj.wso2_closure_state IS NULL OR proj.wso2_closure_state::text <> ALL($%d::text[]))", argIdx)
+		filterArgs = append(filterArgs, upper)
+		argIdx++
+	}
+
+	// Same NULL-permissive matching as ProjectRepository.SearchProjects'
+	// ExcludeSubscriptionTypes clause -- see that clause's own doc comment
+	// for why project_type.name is normalized in SQL rather than compared
+	// as-is. Likewise always the fixed mandatoryExcludeSubscriptionTypes
+	// slice, not a caller-supplied filter.
+	if len(excludeSubscriptionTypes) > 0 {
+		types := make([]string, len(excludeSubscriptionTypes))
+		for i, t := range excludeSubscriptionTypes {
+			types[i] = string(t)
+		}
+		where += fmt.Sprintf(" AND (pt.name IS NULL OR lower(replace(pt.name, ' ', '_')) <> ALL($%d::text[]))", argIdx)
+		filterArgs = append(filterArgs, types)
+		argIdx++
+	}
+
+	// DISTINCT: a project can have more than one deployed_product row
+	// matching this exact product+version (e.g. two deployments each
+	// running it), which would otherwise duplicate the project in both the
+	// count and the result.
+	countQuery := "SELECT COUNT(DISTINCT proj.id) FROM deployed_product dp" +
+		" JOIN project proj ON dp.project_id = proj.id" +
+		" LEFT JOIN project_type pt ON pt.id = proj.project_type_id " + where
+
+	dataQuery := fmt.Sprintf(
+		`SELECT DISTINCT proj.id, proj.name
+		 FROM deployed_product dp
+		 JOIN project proj ON dp.project_id = proj.id
+		 LEFT JOIN project_type pt ON pt.id = proj.project_type_id
+		 %s
+		 ORDER BY proj.name, proj.id
+		 LIMIT $%d OFFSET $%d`,
+		where, argIdx, argIdx+1,
+	)
+	dataArgs := append(append([]any{}, filterArgs...), req.Pagination.Limit, req.Pagination.Offset)
+
+	var total int
+	var projects []domain.EntityRef
+
+	eg, egCtx := errgroup.WithContext(ctx)
+
+	eg.Go(func() error {
+		if err := r.db.QueryRow(egCtx, countQuery, filterArgs...).Scan(&total); err != nil {
+			return fmt.Errorf("count projects by product version: %w", err)
+		}
+		return nil
+	})
+
+	eg.Go(func() error {
+		rows, err := r.db.Query(egCtx, dataQuery, dataArgs...)
+		if err != nil {
+			return fmt.Errorf("query projects by product version: %w", err)
+		}
+		defer rows.Close()
+
+		result := make([]domain.EntityRef, 0, req.Pagination.Limit)
+		for rows.Next() {
+			var p domain.EntityRef
+			if err := rows.Scan(&p.ID, &p.Name); err != nil {
+				return fmt.Errorf("scan project by product version: %w", err)
+			}
+			result = append(result, p)
+		}
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("iterate projects by product version: %w", err)
+		}
+		projects = result
+		return nil
+	})
+
+	if err := eg.Wait(); err != nil {
+		return nil, 0, err
+	}
+
+	return projects, total, nil
+}
+
+// deployedProductCreateFKField maps deployed_product's own foreign-key
+// constraint names (migration 000014's auto-generated
+// "<table>_<column>_fkey" names) to the request field that referenced the
+// missing row, for CreateDeployedProductFromServiceNow's 23503 handling --
+// same map-based convention as change_request_repo.go's
+// changeRequestPatchFKField/changeRequestPatchCRFKField.
+var deployedProductCreateFKField = map[string]string{
+	"deployed_product_project_id_fkey":    "projectId",
+	"deployed_product_deployment_id_fkey": "deploymentId",
+	"deployed_product_product_id_fkey":    "productId",
+	"deployed_product_version_id_fkey":    "versionId",
+}
+
+const createDeployedProductFromServiceNowQuery = `
+	INSERT INTO deployed_product (
+		id, created_on, updated_on, created_by, updated_by,
+		number, description, active,
+		core_count, tps_count,
+		project_id, deployment_id, product_id, version_id
+	)
+	VALUES (
+		$1, $2, $2, $3, $3,
+		$4, $5, TRUE,
+		$6, $7,
+		$8::uuid, $9::uuid, $10::uuid, $11::uuid
+	)
+	RETURNING id, created_on, created_by`
+
+// CreateDeployedProductFromServiceNow implements DeployedProductRepository.
+// name/life_cycle_stage/life_cycle_stage_status/product_category/update_level_info
+// are left NULL -- CreateDeployedProductRequest carries no fields for them
+// (SN's own create payload doesn't send them either, see
+// snCreateDeployedProductPayload), matching parity between the two data
+// sources rather than inventing values ServiceNow itself doesn't set on
+// create.
+func (r *deployedProductRepo) CreateDeployedProductFromServiceNow(ctx context.Context, req domain.CreateDeployedProductRequest, id, number, createdBy string, createdOn time.Time) (domain.CreatedDeployedProduct, error) {
+	var created domain.CreatedDeployedProduct
+	err := r.db.QueryRow(ctx, createDeployedProductFromServiceNowQuery,
+		id, createdOn, createdBy,
+		number, req.Description,
+		req.Cores, req.TPS,
+		req.ProjectID, req.DeploymentID, req.ProductID, req.VersionID,
+	).Scan(&created.ID, &created.CreatedOn, &created.CreatedBy)
+	if err != nil {
+		if pgErr := (*pgconn.PgError)(nil); errors.As(err, &pgErr) {
+			switch pgErr.Code {
+			case "23505": // unique_violation -- number or id already exists
+				return domain.CreatedDeployedProduct{}, &apierror.ValidationError{Msg: "a deployed product with this identity already exists"}
+			case "23503": // foreign_key_violation -- one of the referenced ids does not exist
+				field := deployedProductCreateFKField[pgErr.ConstraintName]
+				if field == "" {
+					field = "one or more referenced fields"
+				}
+				return domain.CreatedDeployedProduct{}, &apierror.ValidationError{Msg: field + " does not refer to an existing record"}
+			}
+		}
+		return domain.CreatedDeployedProduct{}, fmt.Errorf("create deployed product from servicenow: %w", err)
+	}
+	return created, nil
+}
+
+// parseUpdateDeployedProductDescription reports whether req.Description (a
+// json.RawMessage, see that field's own doc comment) was provided at all,
+// and if so, the *string value to write -- nil for an explicit
+// "description":null (clear it), a non-nil pointer for a real value.
+// Absent (len(raw) == 0) returns provided=false so the caller's COALESCE-style
+// CASE leaves the existing column value untouched. A value that decodes to
+// neither null nor a JSON string is rejected as a ValidationError rather than
+// reaching the database as a type-mismatched write -- decodeRequest's own
+// json.Unmarshal already guarantees raw is syntactically valid JSON by this
+// point, just not necessarily a string.
+func parseUpdateDeployedProductDescription(raw json.RawMessage) (provided bool, value *string, err error) {
+	if len(raw) == 0 {
+		return false, nil, nil
+	}
+	if string(raw) == "null" {
+		return true, nil, nil
+	}
+	var s string
+	if unmarshalErr := json.Unmarshal(raw, &s); unmarshalErr != nil {
+		return false, nil, &apierror.ValidationError{Msg: "description must be a string or null"}
+	}
+	return true, &s, nil
+}
+
+const updateDeployedProductFieldsQuery = `
+	UPDATE deployed_product SET
+		updated_on = NOW(), updated_by = $2,
+		core_count = COALESCE($3, core_count),
+		tps_count = COALESCE($4, tps_count),
+		description = CASE WHEN $5 THEN $6 ELSE description END,
+		update_level_info = CASE WHEN $7 THEN $8::jsonb ELSE update_level_info END,
+		active = COALESCE($9, active)
+	WHERE id = $1::uuid
+	AND ($10::uuid IS NULL OR deployment_id = $10::uuid)
+	RETURNING id, updated_on, updated_by`
+
+// UpdateDeployedProductFields implements DeployedProductRepository.
+//
+// Cores/TPS have no "explicit clear" state on the wire (both are plain
+// nilable Go pointers, domain.UpdateDeployedProductRequest's own
+// json:"cores"/json:"tps" tags have no omitempty-defeating RawMessage
+// trick) -- nil always means "not provided", so a plain COALESCE is enough,
+// same limitation ServiceNow's own snUpdateDeployedProductPayload has for
+// these two fields (parity between data sources, not a gap introduced here).
+//
+// Description, in contrast, is json.RawMessage precisely so "not provided",
+// "clear it", and "set it" all stay distinguishable -- see
+// parseUpdateDeployedProductDescription.
+//
+// Updates (update_level_info, JSONB) is a whole-array replace when req.Updates
+// is non-nil (including a non-nil empty slice, the caller's way of clearing
+// all history -- see UpdateDeployedProductRequest's own doc comment), encoded
+// via encoding/json using domain.ProductUpdateEntry's own
+// updateLevel/date/details wire tags. This is the first write to this
+// column anywhere in this codebase -- SearchDeployedProducts deliberately
+// leaves it unselected (its own TODO(phase 2) comment) because no real
+// payload had confirmed its shape; this establishes that shape going
+// forward, matching the wire contract's own field names rather than
+// inventing a different one.
+func (r *deployedProductRepo) UpdateDeployedProductFields(ctx context.Context, req domain.UpdateDeployedProductRequest, updatedBy string) (domain.UpdatedDeployedProduct, error) {
+	descriptionProvided, description, err := parseUpdateDeployedProductDescription(req.Description)
+	if err != nil {
+		return domain.UpdatedDeployedProduct{}, err
+	}
+
+	updatesProvided := req.Updates != nil
+	var updatesJSON []byte
+	if updatesProvided {
+		updatesJSON, err = json.Marshal(req.Updates)
+		if err != nil {
+			return domain.UpdatedDeployedProduct{}, fmt.Errorf("marshal deployed product updates: %w", err)
+		}
+	}
+
+	var updated domain.UpdatedDeployedProduct
+	err = r.db.QueryRow(ctx, updateDeployedProductFieldsQuery,
+		req.ID, updatedBy,
+		req.Cores, req.TPS,
+		descriptionProvided, description,
+		updatesProvided, updatesJSON,
+		req.Active,
+		req.DeploymentID,
+	).Scan(&updated.ID, &updated.UpdatedOn, &updated.UpdatedBy)
+	if errors.Is(err, pgx.ErrNoRows) {
+		if req.DeploymentID != nil {
+			return domain.UpdatedDeployedProduct{}, &apierror.NotFoundError{Msg: "deployed product not found for the given deployment"}
+		}
+		return domain.UpdatedDeployedProduct{}, &apierror.NotFoundError{Msg: "deployed product not found"}
+	}
+	if err != nil {
+		return domain.UpdatedDeployedProduct{}, fmt.Errorf("update deployed product fields: %w", err)
+	}
+	if req.Updates != nil {
+		updated.Updates = req.Updates
+	}
+	return updated, nil
 }

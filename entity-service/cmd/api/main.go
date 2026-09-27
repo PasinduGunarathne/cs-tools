@@ -30,6 +30,7 @@ import (
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/config"
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/db"
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/eventbus"
+	"github.com/wso2-open-operations/cs-tools/entity-service/internal/github"
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/repository"
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/server"
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/service"
@@ -62,7 +63,42 @@ func main() {
 	}
 
 	addr := ":" + cfg.ServerPort
-	srv, eventPublisher := server.New(addr, pool, cfg)
+	srv, closePublishers := server.New(addr, pool, cfg)
+
+	// The outbound GitHub worker: drains github_outbound_queue and pushes
+	// change-request activity to the linked issue. Same gate as the webhook --
+	// one switch turns the whole integration on or off, so it can never run
+	// half-connected.
+	githubCtx, stopGithub := context.WithCancel(context.Background())
+	defer stopGithub()
+	if cfg.HasGithubIntegration() {
+		if pool == nil {
+			log.Printf("GITHUB_INTEGRATION_ENABLED is set but there is no database pool (DATA_SOURCE=%s): the outbound worker is disabled", cfg.DataSource)
+		} else {
+			worker := service.NewGithubOutboundWorker(
+				repository.NewGithubOutboundRepository(pool),
+				service.NewGithubOutboundService(
+					github.NewClient(github.Config{BaseURL: cfg.GithubBaseURL, Token: cfg.GithubToken}),
+				),
+				cfg.GithubOutboundInterval,
+			)
+			go worker.Run(githubCtx)
+			log.Printf("github outbound worker enabled (every %s)", cfg.GithubOutboundInterval)
+		}
+	}
+
+	// CSM-native SLA engine recompute worker: periodically recomputes every
+	// source='CSM' "sla" row's elaped percentage/breach status (migration
+	// 000088) — see service.SLAEngineRecomputeWorker's own doc comment.
+	// Gated on pool the same way the GitHub outbound worker above is:
+	// nowhere to read/write a clock at all with no database configured.
+	slaEngineCtx, stopSLAEngine := context.WithCancel(context.Background())
+	defer stopSLAEngine()
+	if pool != nil {
+		slaEngineWorker := service.NewSLAEngineRecomputeWorker(repository.NewSLAEngineRepository(pool), cfg.SLARecomputeInterval)
+		go slaEngineWorker.Run(slaEngineCtx)
+		log.Printf("sla engine recompute worker enabled (every %s)", cfg.SLARecomputeInterval)
+	}
 
 	// Change-request notices: a background poller over event_outbox, gated on
 	// CR_NOTICES_ENABLED. Off by default because ServiceNow still sends these
@@ -144,14 +180,15 @@ func main() {
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		log.Fatalf("graceful shutdown failed: %v", err)
 	}
-	if eventPublisher != nil {
-		eventPublisher.Close()
-	}
+	// Closes both of the router's producers -- the shared event topic and
+	// the onboarding one.
+	closePublishers()
 	// Stop the drainer before closing its producer, so a notice in flight is
 	// not handed a writer that has already gone away.
 	stopCRNotices()
 	if crPublisher != nil {
 		crPublisher.Close()
 	}
+	stopSLAEngine()
 	log.Println("server stopped")
 }
