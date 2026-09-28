@@ -229,6 +229,21 @@ export default function CsmTeamSchedulePage(): JSX.Element {
   /** Nobody's group: a manager, who belongs to no team at all. */
   const isManager = myFamily === undefined;
 
+  /** Someone who runs a rota without being on one.
+   *
+   *  A rota admin's grant is the cre_rota_admin / sre_rota_admin role, not
+   *  membership of the teams they cover -- they hold no team_member row by
+   *  design, so /users/me places them in no family and everything below reads
+   *  them as a manager. That is right for every view except their own week,
+   *  which a manager is not offered at all: this reader has a rota to run, so
+   *  the week is exactly what they came for, whether or not they are on it.
+   *
+   *  Recognised by what they may edit rather than by the role name, because
+   *  the page never sees role names -- my-lead-teams answers "which teams may
+   *  I change", and for somebody on no team at all, a non-empty answer can
+   *  only have come from the role. */
+  const isRotaAdmin = isManager && canEditRota;
+
   /** The tab the page opens on. An engineer's first question is their own
    *  rota, so they land on My week; a manager holds none, and comes here to see
    *  who is covering, so they land on Today. Derived rather than set in an
@@ -251,9 +266,14 @@ export default function CsmTeamSchedulePage(): JSX.Element {
    *                 because they hold none. Who is covering -- today, across
    *                 the week, across the month -- is their question for CRE
    *                 and SRE alike, so the roster is theirs to read too.
+   *   a rota admin  everything, on both groups. A manager's exception does
+   *                 not apply to them: My week shows their own rota beside
+   *                 everyone else's, and the second half is the useful one
+   *                 for somebody covering a gap -- an empty own-rota costs
+   *                 them seven blank day cards, not the view.
    */
   const appliesToView = (t: ViewTab): boolean => {
-    if (isManager) return t !== "mine";
+    if (isManager) return t !== "mine" || isRotaAdmin;
     return ownGroup || t === "today";
   };
 
@@ -266,9 +286,19 @@ export default function CsmTeamSchedulePage(): JSX.Element {
    * A manager has no such toggle: they hold no rota on either group, so My week
    * can never apply to them, and a permanently dead tab is just something to
    * wonder about. It is not offered.
+   *
+   * A rota admin keeps it. They are a manager by every other test here, but
+   * My week is not dead for them -- it carries everyone else's week beside
+   * their own, which is the half that matters to whoever is filling a gap.
+   *
+   * The tab therefore appears a frame late for them, once my-lead-teams has
+   * answered. Appearing is the tolerable direction: a tab arriving is not the
+   * strip changing shape under a reader the way one vanishing is, and the
+   * landing tab is unaffected -- isManager still decides that, so a rota admin
+   * still opens on Today and nothing moves beneath them.
    */
   const visibleTabs: ViewTab[] = (["mine", "today", "week", "roster"] as ViewTab[]).filter(
-    (t) => !(isManager && t === "mine"),
+    (t) => !(isManager && !isRotaAdmin && t === "mine"),
   );
 
   /** The tab actually being shown.
