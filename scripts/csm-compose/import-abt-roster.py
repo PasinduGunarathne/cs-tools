@@ -78,13 +78,16 @@ ABSENCES = {
     "ll": ("LIEU_LEAVE", None),
     "l": ("LIEU_LEAVE", None),  # one cell in 2026; LL with the second L missing
     "sl": ("SICK_LEAVE", None),
-    # ML on the sheet is Medical Leave, which this vocabulary calls sick
-    # leave -- 000096 created both and 000098 merged medical into sick
-    # deliberately. It is not maternity: MATERNITY_LEAVE only took the short
-    # code ML later, in 000107, once medical had freed it, and matching the
-    # sheet's code against a short code rather than a meaning is what put
-    # engineers on maternity leave for a day off sick.
-    "ml": ("SICK_LEAVE", None),
+    # ML on the sheet is Maternity leave, confirmed by the people who keep the
+    # sheet. It was mapped to SICK_LEAVE for a while on the reading that it
+    # meant Medical leave; that was wrong, and it filed real maternity leave as
+    # sick leave.
+    #
+    # The sheet itself says so twice over, which is worth recording because the
+    # short-code coincidence is genuinely confusing: SL above is already sick
+    # leave, so a second code for the same thing would be redundant, and PL
+    # directly below is paternity. ML and PL are a pair.
+    "ml": ("MATERNITY_LEAVE", None),
     "pl": ("PATERNITY_LEAVE", None),
     "mig": ("MIGRATION", None),
     # Lent to the Migration team from their ABT: away from the ABT's rota
