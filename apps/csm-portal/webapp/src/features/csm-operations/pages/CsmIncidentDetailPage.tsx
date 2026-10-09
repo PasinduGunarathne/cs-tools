@@ -111,6 +111,7 @@ import type { CreateIncidentFromIncidentNavState } from "@features/csm-operation
 import type { CreateProblemFromIncidentNavState } from "@features/csm-operations/utils/problems";
 import { looksLikeHtml, sanitizeStructuredHtml } from "@utils/sanitizeHtml";
 import { linkifyBareUrls } from "@features/csm-cases/utils/commentContent";
+import { withRenderedIncidentNotes } from "@features/csm-operations/utils/incidentNoteHtml";
 
 const OPERATIONS_INCIDENTS_PATH = "/operations/incidents";
 
@@ -311,6 +312,7 @@ export default function CsmIncidentDetailPage(): JSX.Element {
     isLoading: isCommentsLoading,
     isError: isCommentsError,
   } = useGetCsmIncidentComments(id);
+  const renderedComments = useMemo(() => withRenderedIncidentNotes(comments ?? []), [comments]);
   const patchComment = usePatchComment();
   const deleteComment = useDeleteComment();
   const onEditComment = useCallback(
@@ -595,7 +597,7 @@ export default function CsmIncidentDetailPage(): JSX.Element {
       const { generateIncidentReportPdf } = await import(
         "@features/csm-operations/utils/incidentReportPdf"
       );
-      generateIncidentReportPdf(incident, comments ?? [], activityAudit ?? [], attachmentList);
+      generateIncidentReportPdf(incident, renderedComments, activityAudit ?? [], attachmentList);
     } catch (err) {
       showError("Could not export this incident as a PDF. Please try again.", err);
     }
@@ -949,7 +951,7 @@ export default function CsmIncidentDetailPage(): JSX.Element {
             </Button>
           )}
           <CaseActivitiesFeed
-            comments={comments ?? []}
+            comments={renderedComments}
             audit={activityAudit ?? []}
             attachments={attachmentList}
             onDownloadAttachment={
