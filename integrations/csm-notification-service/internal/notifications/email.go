@@ -169,6 +169,8 @@ func (a EmailAttachment) MarshalJSON() ([]byte, error) {
 // byteArray marshals as a JSON array of numbers instead of a base64 string.
 type byteArray []byte
 
+// MarshalJSON writes b as [n,n,...] with each byte in decimal, and [] when b
+// is empty or nil.
 func (b byteArray) MarshalJSON() ([]byte, error) {
 	out := make([]byte, 0, 2+4*len(b))
 	out = append(out, '[')
