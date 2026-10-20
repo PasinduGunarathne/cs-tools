@@ -332,10 +332,11 @@ DROP FUNCTION IF EXISTS team_schedule_assignment_matches_shift(), team_schedule_
 
 ## Rotas: IaaS SRE and the SME rotations (0199–0200)
 
-A **rota** is a named rotation inside a family. SRE runs SaaS (Apollo & Artemis)
-and IaaS. **SME**, a third family added in 0199, runs one rota per product:
+A **rota** is a named rotation inside a family. SRE runs SaaS (Apollo & Artemis),
+IaaS, U2 and B-Central. **SME**, a third family added in 0199, runs one rota per product:
 Asgardeo, Choreo Runtime, Bijira, Devant, WSO2 Cloud · Agent platform,
-WSO2 Cloud · Core and Moesif, plus U2 and B-Central (0217). The source is the "CSM SRE + SME on call" doc.
+WSO2 Cloud · Core and Moesif. U2 and B-Central were added as SME rotas in 0217 and
+moved to SRE in 0242. The source is the "CSM SRE + SME on call" doc.
 PaaS SRE is N/A there, so it has no rota until it has a schedule.
 
 | Rota | Family | Team type | Zones (LK time) | Duty rotates | Escalation |
@@ -396,9 +397,10 @@ them by.
 **Not changed, on purpose:**
 - **`rota.escalation_minutes` is informational.** The escalation ladder
   (csm-notification-service) keeps its own timing.
-- **The notification service only runs the CRE ladder.** Its rota rungs are
-  scoped by team type and key, so the new teams never reach it. An SRE or SME
-  ladder is separate work.
+- **The notification service ran only the CRE ladder when this shipped.** Its
+  CRE rota rungs are scoped by team type and key, so the new teams never reach
+  them. It has since gained the SRE ladder (SaaS, IaaS and, since 0242, U2-SRE
+  and B-Central-SRE, each from its own rota) and the SME page.
 
 ## The SaaS Night cover (0232)
 
