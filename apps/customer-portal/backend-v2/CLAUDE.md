@@ -252,21 +252,31 @@ happen to point at the same host in some deployments, which is why `TrackingBase
 guaranteed to always match, so don't collapse them into a single field.
 
 It backs two routes:
-- `POST /projects/{projectId}/deployments/{deploymentId}/license` — provisions (or resumes
-  provisioning) a WSO2 API Manager application/subscription/credentials for a deployment and
-  returns the resulting license. `ProcessLicenseDownload` (`internal/productconsumption/subscription.go`)
-  implements the upstream state machine — it is **not idempotent-by-accident-safe to reimplement
-  casually**: it can make up to 5 sequential upstream calls, several with side effects (creating an
-  application, subscribing it, generating credentials), and each step only runs if the project's
-  upstream-tracked status hasn't reached it yet. Read the whole function before touching it — a
-  subtly wrong condition could create a duplicate WSO2 API Manager application. The handler first
-  calls `entity.GetProject` purely as an access-control gate, discarding the result —
-  entity-service is still the actual authorization boundary for "does this caller own this
-  project." Because up to 5 sequential upstream calls can plausibly exceed the server's global
-  `WriteTimeout` (see `cmd/server/main.go`) even when no single step is slow, the handler extends
-  its own write deadline via `http.NewResponseController(w).SetWriteDeadline` — which only works
-  because `middleware.responseWriter` forwards `SetWriteDeadline`/`SetReadDeadline` to the
-  underlying `ResponseWriter`, the same reason it forwards `Hijack` for the WebSocket route above.
+- `POST /projects/{projectId}/deployments/{deploymentId}/license` — returns the deployment's
+  license. `PRODUCT_CONSUMPTION_LICENSE_MODE` selects how `ProcessLicenseDownload`
+  (`internal/productconsumption/subscription.go`, the single dispatch point) provisions it:
+  - `service` (**the default**; unset or empty means service): **one call** to the subscription
+    service's `POST /projects/{projectId}/deployments/{deploymentId}/license`; the provisioning
+    state machine lives in that service, not here.
+  - `legacy` (must be set explicitly; an environment that must keep the old flow sets
+    `PRODUCT_CONSUMPTION_LICENSE_MODE=legacy`): the backend itself drives the subscription
+    service's per-project state machine (`subscription_legacy.go`, `types_legacy.go`,
+    `jsonint.go`): consumption-status check, create application, patch project, subscribe,
+    generate-credentials, generate-secret-keys, then fetch the license, each step only once and
+    resuming from the project's current state. Up to 5 sequential upstream requests.
+  Any other value fails startup (`productconsumption.ParseLicenseMode`). **The two modes must
+  never both drive the state machine for the same deployment**: in `legacy` the backend is the
+  driver, in `service` the subscription service is, and two drivers can create a duplicate
+  application. Switch the mode for the whole environment at once. In both modes the client refuses a `success:false` answer, missing
+  subscription data or a missing signature as a data error rather than handing back an unusable
+  license. The handler
+  first calls `entity.GetProject` purely as an access-control gate, discarding the result —
+  entity-service is still the authorization boundary for "does this caller own this project."
+  Provisioning a first license can take several upstream calls (made by this backend in `legacy`,
+  inside the subscription service in `service`), so the handler extends its own write deadline via
+  `http.NewResponseController(w).SetWriteDeadline`, which only works because
+  `middleware.responseWriter` forwards `SetWriteDeadline`/`SetReadDeadline` to the underlying
+  `ResponseWriter`, the same reason it forwards `Hijack` for the WebSocket route above.
 - `POST /deployment-usages` — imports a deployment-usage zip file. Unlike every other endpoint in
   this backend, the request body is **raw binary**, not JSON — see `readBinaryBody` in
   `internal/handler/response.go` (a `readJSONBody` counterpart with a larger size cap,
@@ -274,6 +284,27 @@ It backs two routes:
   check in the handler, which together validate the upload the way the upstream service requires.
   The Go client base64-encodes the bytes before forwarding to the upstream service, matching its
   JSON contract exactly (`{"email": "...", "zip": "<base64>"}`).
+  **The upload names no project, so the report decides whose usage it is.** A usage report is a
+  ZIP holding one JSON file as WSO2 products export it; `usageReportDeploymentNumber`
+  (`internal/handler/usage_report.go`) reads only its `export_metadata.deployment_id`
+  (decompression capped at `maxUsageReportBytes`), and the handler looks that deployment number up
+  with entity-service's `POST /deployments/search` (`numbers`, inactive included) **as the caller**.
+  entity-service returns it only to an internal user or a registered contact of its project, so a
+  report for someone else's deployment is a 404 and is never forwarded. Anything that is not such a
+  report is a 400. The product-consumption service then verifies the report's signature against that
+  deployment's key and refuses a report the product marked invalid; this backend checks neither.
+  **`PRODUCT_CONSUMPTION_USAGE_IMPORT_MODE`** (independent of the license mode) selects whether
+  that pre-check runs, dispatched in one place in `ImportDeploymentUsage`:
+  - `service` (**the default**; unset or empty means service): the behaviour just described.
+  - `legacy` (must be set explicitly): the upload is forwarded as is, with no report inspection
+    and no deployment lookup, so the 400-for-non-report and 404-for-invisible-deployment
+    answers above do not occur from this backend (only the content-type and size checks and the
+    upstream's own errors remain). The request and response shapes are the same in both modes.
+  Any other value fails startup (`productconsumption.ParseUsageImportMode`).
+
+  **Holding an environment on the old behaviour:** set both `PRODUCT_CONSUMPTION_LICENSE_MODE=legacy`
+  and `PRODUCT_CONSUMPTION_USAGE_IMPORT_MODE=legacy`. The two flags are independent, so all four
+  combinations work.
 
 ## The registry service
 
@@ -603,6 +634,61 @@ validated here.
 
 **When you add a field a customer may set, add it to `ChangeRequestCustomerUpdateRequest` and say
 why here; a field in `ChangeRequestUpdateRequest` is staff-only.**
+
+## The internal-write-group gate: an INTERNAL-type user needs a token-proven group to write here
+
+entity-service grants a caller classified `user_type = INTERNAL` a much broader ("Unrestricted")
+access scope than a genuine customer/partner gets (see that service's own CLAUDE.md,
+`AccessService.ResolveScope`). That matters here specifically because a WSO2-internal person can
+end up `INTERNAL` there for reasons that have nothing to do with the customer portal — e.g. being
+corrected from a misclassified `EXTERNAL` after being granted the entity-service `internal` role so
+they read correctly as an account manager / technical owner elsewhere. Without a separate check,
+becoming `INTERNAL` there would silently also hand that person full write access to every project's
+cases, change requests, deployments, etc. in *this* portal, since `permissionMatrix` already grants
+`RoleInternal` the same CRUD as `RoleAgent`.
+
+**The gate**: an `INTERNAL`-type caller (entity-service's `user_type`) may reach a write path here
+only if their own JWT `groups` claim — the token they authenticated with, not entity-service's
+business roles from `GetMe().Roles` — contains at least one of the names configured in
+`AUTH_INTERNAL_WRITE_GROUPS` (comma-separated, optional — see README.md). Unset/empty means the
+gate is off: every `INTERNAL` caller keeps full write access, same as before this gate existed; set
+it only once the real write-access group is known. A non-`INTERNAL` caller (a genuine
+customer/partner) is never touched by this gate; their write access
+is still decided entirely by `permissionMatrix`. `groups`, not `roles`, is deliberate: this app's
+own OAuth client has never been provisioned to emit a `roles` claim at all — the deprecated v1
+Ballerina backend's own JWT payload type (`modules/authorization/types.bal`) only ever decoded
+`email`/`groups`/`userid`, confirming `groups` is the claim this app's tokens actually carry
+(`middleware.UserInfo.Groups` already existed before this gate, unused until now).
+
+- **`user_type` plumbing**: `entity.GetUserMeResponse.UserType` (`internal/entity/types.go`,
+  `entity.UserTypeInternal = "internal"`) — entity-service's response was previously silently
+  dropping this field.
+- **Backend enforcement**: `middleware.CachedRoleResolver.IsInternalWriteBlocked` (`internal/middleware/rbac.go`)
+  answers the gate from the same cached `GetMe` entry `GetRoles` already populates (one round trip
+  serves both, not two). `RequirePermission`/`RequirePermissionOneOf`/`RequireRoles` apply it via an
+  optional-interface check (`WriteAccessResolver`), so adding it needed **no new parameter on any of
+  the ~40 call sites in `main.go`** — a resolver that doesn't implement it (every existing test fake)
+  is simply never blocked. `RequirePermission`/`RequirePermissionOneOf` only apply the gate to a
+  non-`ActionRead` action; every `RequireRoles` call site is a write route already, so it always
+  applies there. Construct the live resolver with `.WithInternalWriteGroups(groups)` (`main.go`); a
+  resolver built without it (every test) is inert, matching pre-feature behaviour exactly.
+- **Frontend signal**: `GetMe` additionally computes `dto.UserMeResponse.IsReadOnly` (same rule,
+  computed a second time there purely because the handler already has `entity.GetMe`'s result in
+  hand and isn't itself behind this gate — any authenticated caller may always read their own
+  profile). The webapp's `useCustomerPermissions.ts` folds it straight into `can()`: `isReadOnly &&
+  action !== "read"` always denies, so every existing `can("module", "create"/"update"/"delete")`
+  call site is covered with no changes elsewhere. **This is a UI hint, not the security boundary** —
+  the backend gate above is what actually matters; the frontend flag only decides what gets shown.
+
+**Known gap, not covered by this change**: a handful of write-shaped routes are registered as bare
+`mux.HandleFunc` with no `RequirePermission`/`RequirePermissionOneOf`/`RequireRoles` wrapper at all
+today — `POST`/`PATCH /projects/{id}/conversations*`, `PATCH /conversations/{id}`,
+`DELETE /attachments/{id}`, `POST /projects/{projectId}/deployments/{deploymentId}/license`, and
+`POST /deployment-usages`. The gate above only ever fires through those three guard functions, so an
+`INTERNAL` caller with no configured write group can still reach these specific routes. This predates
+the gate (those routes were already open to any authenticated caller of any role) and wasn't widened
+or narrowed by this change — closing it means first deciding what module/action (or a new one) each
+belongs under in `permissionMatrix`, which is a separate decision.
 
 ## Response shaping — the "wrapper" pattern
 

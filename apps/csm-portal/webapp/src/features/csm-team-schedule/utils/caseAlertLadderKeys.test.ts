@@ -19,12 +19,15 @@
 import { describe, expect, it } from "vitest";
 import type { CaseAlertSettings } from "../types";
 import {
+  ADVANCED_GROUPS,
   LADDER_KEYS,
+  creTimingRows,
   draftFor,
   fileOnlyRows,
   formatLadderValue,
   ladderKeysFor,
   parseDraft,
+  runningLine,
   valuesToCopy,
   type LadderKeySpec,
 } from "./caseAlertLadderKeys";
@@ -40,8 +43,8 @@ const draft = { text: "", checked: false, name: "", email: "" };
 describe("caseAlertLadderKeys", () => {
   it("lists each key once, on the ladders the design gives it", () => {
     expect(new Set(LADDER_KEYS.map((k) => k.key)).size).toBe(LADDER_KEYS.length);
-    expect(ladderKeysFor("CRE")).toHaveLength(22);
-    expect(ladderKeysFor("SRE")).toHaveLength(14);
+    expect(ladderKeysFor("CRE")).toHaveLength(27);
+    expect(ladderKeysFor("SRE")).toHaveLength(19);
     expect(ladderKeysFor("SRE").map((k) => k.key)).not.toContain("heads.cre");
     expect(ladderKeysFor("CRE").map((k) => k.key)).not.toContain("timing.interval");
   });
@@ -100,6 +103,79 @@ describe("caseAlertLadderKeys", () => {
     expect(fileOnlyRows("CRE", f).map((r) => r.label)).toContain("Call the heads when nobody below can be called");
   });
 
+  it("words the CRE-only file settings: the stopped reply, the rung emails and the rule table", () => {
+    const f = {
+      ackChat: false,
+      "email.enabled": true,
+      "email.teamLists": 2,
+      "email.creTeamList": true,
+      "email.csTeamList": false,
+      "rules.custom": false,
+    };
+    const cre = Object.fromEntries(fileOnlyRows("CRE", f).map((r) => [r.label, r.value]));
+    expect(cre).toMatchObject({
+      "Reply in the thread when a chain stops": "No",
+      "Email per step": "On (2 team lists, CRE list set, CS list not set)",
+      "Who each step calls": "Built-in rules (Case Paging Rules sheet)",
+    });
+    expect(fileOnlyRows("CRE", { "email.enabled": false, "rules.custom": true }).map((r) => r.value)).toEqual(
+      expect.arrayContaining(["Off", "The file's own rule table"]),
+    );
+    // SRE has no rung emails and no rule table.
+    const sre = fileOnlyRows("SRE", f).map((r) => r.label);
+    expect(sre).toContain("Reply in the thread when a chain stops");
+    expect(sre).not.toContain("Email per step");
+    expect(sre).not.toContain("Who each step calls");
+  });
+
+  it("words the CRE timing table from the alert service's minutes", () => {
+    const rows = creTimingRows({
+      S0: [[0], [1, 2, 3], [4, 5, 6], [8, 9, 10], [12, 13, 14]],
+      S2: [[9, 12], [15, 19, 23], [30, 34, 38], [45, 49, 53], [60, 64, 68]],
+    });
+    expect(rows).toEqual([
+      { severity: "S0", steps: ["+0", "+1, +2, +3", "+4, +5, +6", "+8, +9, +10", "+12, +13, +14"], ends: "+14 min" },
+      { severity: "S2", steps: ["+9, +12", "+15, +19, +23", "+30, +34, +38", "+45, +49, +53", "+60, +64, +68"], ends: "+68 min" },
+    ]);
+    expect(creTimingRows(undefined)).toEqual([]);
+    expect(creTimingRows({ S1: [[], [9]] })[0].steps).toEqual(["—", "+9", "—", "—", "—"]);
+  });
+
+  it("leaves out of the file-only block what the tab now edits", () => {
+    const f = { enabled: true, channel: "both", "safety.maxCallsPerLadder": 4, "safety.allowedNumbers": 0 };
+    const onTab = new Set(["enabled", "channel", "safety.maxCallsPerLadder", "safety.callWithoutVerifiedLeads"]);
+    const labels = fileOnlyRows("SRE", f, onTab).map((r) => r.label);
+    expect(labels).toEqual([
+      "Highest step",
+      "Allowed numbers",
+      "Phone numbers from",
+      "Reply in the thread when a chain stops",
+    ]);
+    // An alert service that does not report them on the tab yet: all still shown here.
+    expect(fileOnlyRows("SRE", f).map((r) => r.label)).toContain("Alerts on");
+  });
+
+  it("puts only each family's switch and channel under On/off and channel, and the call limits on CRE and SRE under Advanced", () => {
+    const keys = (l: "CRE" | "SRE" | "SME", group: string) =>
+      ladderKeysFor(l)
+        .filter((k) => k.group === group)
+        .map((k) => k.key);
+    for (const l of ["CRE", "SRE", "SME"] as const) {
+      expect(keys(l, "On/off and channel")).toEqual(["enabled", "channel"]);
+    }
+    expect(keys("SME", "Call limits")).toEqual([]);
+    expect(keys("CRE", "Call limits")).toEqual([
+      "safety.maxCallsPerLadder",
+      "safety.callWithoutVerifiedLeads",
+      "safety.callHeadsWithoutLowerTiers",
+    ]);
+    expect(keys("SRE", "Call limits")).toEqual(keys("CRE", "Call limits"));
+    expect(ADVANCED_GROUPS[0]).toBe("Call limits");
+    expect(parseDraft(spec("channel"), { ...draft, text: "chat" })).toEqual({ ok: true, value: "chat" });
+    expect(parseDraft(spec("safety.maxCallsPerLadder"), { ...draft, text: "4" })).toEqual({ ok: true, value: 4 });
+    expect(formatLadderValue(spec("channel"), "both")).toBe("Calls and chat");
+  });
+
   it("copies the file's named heads without a phone, and skips an unnamed one", () => {
     const s = {
       values: [],
@@ -117,5 +193,25 @@ describe("caseAlertLadderKeys", () => {
     } as unknown as CaseAlertSettings;
     expect(valuesToCopy(s, "CRE")).toEqual({ "heads.cre": { name: "N", email: "n@x" } });
     expect(valuesToCopy(s, "SRE")).toEqual({});
+  });
+});
+
+describe("runningLine", () => {
+  const settings = (running: CaseAlertSettings["running"]) => ({ running }) as CaseAlertSettings;
+
+  it("says when the alert service reported, and in which mode", () => {
+    const line = runningLine(settings({ reportedAt: "2026-10-13T10:00:00Z", mode: "db", ladders: {} }));
+    expect(line).toMatch(/^"In use" is what the alert service reported at .+, in db mode\.$/);
+    expect(line).not.toContain("Invalid Date");
+  });
+
+  it("leaves the time out when the report has none", () => {
+    expect(runningLine(settings({ mode: "shadow", ladders: {} }))).toBe(
+      '"In use" is what the alert service reported, in shadow mode. In shadow mode it still uses its file; saved values take over in db mode.',
+    );
+  });
+
+  it("says it hasn't reported yet when there is no report", () => {
+    expect(runningLine(settings(undefined))).toMatch(/hasn't reported what it uses yet/);
   });
 });

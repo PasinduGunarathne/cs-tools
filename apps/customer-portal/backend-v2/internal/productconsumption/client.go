@@ -59,6 +59,9 @@ type Config struct {
 	ClientID            string
 	ClientSecret        string
 	Scopes              []string
+	// LicenseMode selects the license provisioning flow; empty means
+	// LicenseModeService. See ParseLicenseMode.
+	LicenseMode LicenseMode
 }
 
 // Client is an HTTP client for the upstream product-consumption service(s),
@@ -70,6 +73,7 @@ type Client struct {
 	http                *http.Client
 	subscriptionBaseURL string
 	trackingBaseURL     string
+	licenseMode         LicenseMode
 }
 
 // NewClient constructs a Client that authenticates against the
@@ -101,10 +105,16 @@ func NewClient(cfg Config) *Client {
 		trackingBaseURL = cfg.SubscriptionBaseURL
 	}
 
+	licenseMode := cfg.LicenseMode
+	if licenseMode == "" {
+		licenseMode = LicenseModeService
+	}
+
 	return &Client{
 		http:                httpClient,
 		subscriptionBaseURL: strings.TrimRight(cfg.SubscriptionBaseURL, "/"),
 		trackingBaseURL:     strings.TrimRight(trackingBaseURL, "/"),
+		licenseMode:         licenseMode,
 	}
 }
 
@@ -176,35 +186,6 @@ func (c *Client) postJSONTracking(ctx context.Context, path string, reqBody, out
 	}
 	if err := json.Unmarshal(body, out); err != nil {
 		return fmt.Errorf("productconsumption: decode response for POST %s: %w", path, err)
-	}
-	return nil
-}
-
-// postText issues a POST with a raw text/plain body — used only for
-// subscribeApplication, whose upstream endpoint expects a bare string
-// payload as raw text/plain, not a JSON-quoted string.
-func (c *Client) postText(ctx context.Context, path, body string, out any) error {
-	respBody, err := c.do(ctx, http.MethodPost, path, "text/plain", []byte(body))
-	if err != nil {
-		return err
-	}
-	if err := json.Unmarshal(respBody, out); err != nil {
-		return fmt.Errorf("productconsumption: decode response for POST %s: %w", path, err)
-	}
-	return nil
-}
-
-func (c *Client) patchJSON(ctx context.Context, path string, reqBody, out any) error {
-	payload, err := json.Marshal(reqBody)
-	if err != nil {
-		return fmt.Errorf("productconsumption: encode request for PATCH %s: %w", path, err)
-	}
-	body, err := c.do(ctx, http.MethodPatch, path, "application/json", payload)
-	if err != nil {
-		return err
-	}
-	if err := json.Unmarshal(body, out); err != nil {
-		return fmt.Errorf("productconsumption: decode response for PATCH %s: %w", path, err)
 	}
 	return nil
 }

@@ -144,6 +144,8 @@ so set both here too.
 | `PRODUCT_CONSUMPTION_SUBSCRIPTION_URL` | Base URL of the subscription/license API |
 | `PRODUCT_CONSUMPTION_TRACKING_BASE_URL` | Base URL of the usage-tracking API (optional — falls back to `PRODUCT_CONSUMPTION_SUBSCRIPTION_URL` when unset) |
 | `PRODUCT_CONSUMPTION_SCOPES` | Comma-separated OAuth2 scopes (optional) |
+| `PRODUCT_CONSUMPTION_LICENSE_MODE` | `service` (default when unset) or `legacy`; see CLAUDE.md. Any other value fails startup |
+| `PRODUCT_CONSUMPTION_USAGE_IMPORT_MODE` | `service` (default when unset) or `legacy`, independent of the license mode; see CLAUDE.md. Any other value fails startup |
 
 ### Registry service
 
@@ -173,6 +175,7 @@ A separate service (not entity-service, not SCIM) — see
 | `AUTH_AUDIENCE` | Comma-separated accepted `aud` values |
 | `AUTH_TOKEN_VALIDATOR_ENABLED` | `false` skips JWT signature verification — **local development only**; `.env.example` ships `false` for local convenience. Production **must** set this to `true` with a real `AUTH_JWKS_ENDPOINT`/`AUTH_ISSUER`/`AUTH_AUDIENCE` |
 | `AUTH_ADMIN_ROLE` | The role string (from entity-service's `GET /users/me` `roles`) that grants admin privileges for registry-token management. Project-contact writes under `CSM_MIGRATION_PORTAL_CONTACTS_ENABLED` use the account admin roles `customer_admin` and `partner_admin` instead, together with an active membership on the project |
+| `AUTH_INTERNAL_WRITE_GROUPS` | Comma-separated JWT `groups` claim values (the caller's own token, not entity-service's business roles) that let an INTERNAL-type user (entity-service's own `user_type`) reach a write path in this portal. An INTERNAL classification alone grants much broader access on entity-service than a genuine customer/partner gets, so write access for such a caller additionally requires membership in one of these groups on their own token. Optional — unset/empty turns the gate off, so every INTERNAL caller keeps full write access (the behavior before this gate existed); set it once the real write-access group is known. Enforced both server-side (`middleware.CachedRoleResolver.IsInternalWriteBlocked`, every `RequirePermission`/`RequirePermissionOneOf`/`RequireRoles`-gated write route) and reported to the webapp as `GET /users/me`'s `isReadOnly` field, which hides write-path UI for such a user. Never affects a non-INTERNAL (genuine customer/partner) caller |
 
 ### ServiceNow-to-CSM cutover
 

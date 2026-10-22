@@ -360,6 +360,10 @@ export interface BeCaseView {
   type?: BeCaseType | null;
   /** Engagement type; only meaningful for `engagement` cases. Null otherwise. */
   engagementType?: string | null;
+  /** Engagement payment type as the data source's display label (e.g. "Paid",
+   * "FOC"), not the {@link BeEngagementPaymentType} code; only meaningful for
+   * `engagement` cases. Not populated by every data source. */
+  engagementPaymentType?: string | null;
   state?: BeCaseState;
   /** Work sub-state; only meaningful while `state` is `work_in_progress`. */
   workState?: BeCaseWorkState | null;
@@ -3262,6 +3266,44 @@ export interface BeTeamSearchPayload {
   pagination?: BePagination;
 }
 
+/** One row of `GET /teams/{id}/members` — the team's real CRE/SRE roster
+ * (role "lead"/"member"), not the registry entry `BeTeam` above describes. */
+export interface BeTeamMember {
+  name: string;
+  email: string;
+  role: string;
+}
+
+/** `GET`/`PATCH /teams/{id}` response — the team's own id/name/type plus its
+ * configured Google Chat space link, `null` when unset. A single generic
+ * team resource (mirroring `BeSnUserDetail`/`GET /users/{id}`) rather than a
+ * dedicated `/teams/{id}/chat-webhook` shape — `chatWebhookUrl` is the only
+ * settable field today. */
+export interface BeTeamDetail {
+  id: string;
+  name: string;
+  type: string;
+  chatWebhookUrl: string | null;
+}
+
+/** `PATCH /teams/{id}` request body. `chatWebhookUrl` is the only settable
+ * field today and is required. */
+export interface BeUpdateTeamPayload {
+  chatWebhookUrl: string;
+}
+
+export interface BeAssignTeamLeadPayload {
+  userId: string;
+}
+
+/** `PATCH /users/{id}` request body — both fields optional, at least one
+ * required. See `apps/csm-portal/backend`'s own CLAUDE.md: restricted to
+ * cs_engineer/admin, for updating someone else's profile by id. */
+export interface BeUpdateUserPayload {
+  timeZone?: string;
+  phone?: string;
+}
+
 export interface BeTeamSearchResponse {
   teams: BeTeam[];
   total: number;
@@ -4505,6 +4547,20 @@ export type BeCaseFeedbackBucket =
   | "reasons_satisfied"
   | "reasons_very_satisfied";
 
+/** Only for shape "count" on resourceType "case": show the number of distinct
+ * values of `field` among the widget's matching records instead of the record
+ * total. Resolved by `useWidgetData` via one `POST /cases/aggregate` call whose
+ * returned group count is the displayed number. Mutually exclusive with
+ * `groupBy`/`slices` (backend-enforced at config-load time). */
+export interface BeDashboardDistinctByConfig {
+  /** What to count distinct values of (`account`, `state`, `severity` or
+   * `type`) — forwarded as the aggregate request's `groupBy`. */
+  field: string;
+  /** Forwarded as the aggregate request's `maxGroups`. Always present on a
+   * dashboard response (the backend fills in its default at load time). */
+  maxGroups: number;
+}
+
 /** Alternative to {@link BeDashboardPieSlice}[] for shapes "pie"/"bar":
  * one server-side `POST /{resourceType}/aggregate` call instead of one
  * `search` per hand-authored slice. Mutually exclusive with `slices` —
@@ -4712,6 +4768,10 @@ export interface BeDashboardWidget {
    * slice. Mutually exclusive with `slices` — the backend enforces
    * exactly one of the two for those shapes (never both, never neither). */
   groupBy?: BeDashboardGroupByConfig;
+  /** Only meaningful for shape "count" (resourceType "case"): the widget
+   * shows the number of distinct values of `distinctBy.field` instead of the
+   * record total. Absent when unset — see {@link BeDashboardDistinctByConfig}. */
+  distinctBy?: BeDashboardDistinctByConfig;
   /** Only meaningful for shapes "pie"/"bar": one search per slice, each
    * read via its own `total`. Mutually exclusive with `groupBy`. */
   slices?: BeDashboardPieSlice[];

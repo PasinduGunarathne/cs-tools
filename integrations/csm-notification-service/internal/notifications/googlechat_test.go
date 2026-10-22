@@ -373,13 +373,42 @@ func TestSendFrustrationAlert_FormatsFrustrationLevelAsADecimal(t *testing.T) {
 		t.Fatalf("SendFrustrationAlert returned error: %v", err)
 	}
 
-	got := capturedBody.CardsV2[0].Card.Sections[0].Widgets[0].TextParagraph.Text
-	if strings.Contains(got, "%!f") {
-		t.Fatalf("card text = %q, contains a Go fmt verb-mismatch marker", got)
+	widgets := capturedBody.CardsV2[0].Card.Sections[0].Widgets
+	score := widgets[0].DecoratedText
+	if score == nil {
+		t.Fatalf("widgets[0] = %+v, want a DecoratedText score row", widgets[0])
 	}
-	want := `<b>WSO2 API Manager</b><br>Frustration level: <b>0.91</b><br>High urgency and explicit expression of frustration indicate dissatisfaction.<br><a href="https://csm.example.com/cases/CASE-1">View case</a>`
-	if got != want {
-		t.Errorf("card text = %q, want %q", got, want)
+	if strings.Contains(score.Text, "%!f") {
+		t.Fatalf("score text = %q, contains a Go fmt verb-mismatch marker", score.Text)
+	}
+	wantScore := `<font color="#DC2626"><b>0.91</b></font> · <font color="#DC2626"><b>Critical</b></font>`
+	if score.Text != wantScore {
+		t.Errorf("score text = %q, want %q", score.Text, wantScore)
+	}
+	if score.TopLabel != "Frustration level" {
+		t.Errorf("score TopLabel = %q, want %q", score.TopLabel, "Frustration level")
+	}
+
+	body := widgets[2].TextParagraph
+	if body == nil {
+		t.Fatalf("widgets[2] = %+v, want the product/reason TextParagraph", widgets[2])
+	}
+	wantBody := `<b>WSO2 API Manager</b><br>High urgency and explicit expression of frustration indicate dissatisfaction.`
+	if body.Text != wantBody {
+		t.Errorf("body text = %q, want %q", body.Text, wantBody)
+	}
+
+	buttons := widgets[3].ButtonList
+	if buttons == nil || len(buttons.Buttons) != 1 {
+		t.Fatalf("widgets[3] = %+v, want a single-button ButtonList", widgets[3])
+	}
+	if got := buttons.Buttons[0].OnClick.OpenLink.URL; got != "https://csm.example.com/cases/CASE-1" {
+		t.Errorf("View case button URL = %q, want the case link", got)
+	}
+
+	header := capturedBody.CardsV2[0].Card.Header
+	if header == nil || header.Title != "🚨 Frustration detected" || header.Subtitle != "CS0448647 · WSO2-1000" {
+		t.Errorf("header = %+v, want Title %q and Subtitle %q", header, "🚨 Frustration detected", "CS0448647 · WSO2-1000")
 	}
 }
 
@@ -407,6 +436,31 @@ func TestSendFrustrationAlert_DoesNotThread(t *testing.T) {
 
 	if capturedBody.Thread != nil {
 		t.Errorf("Thread = %+v, want nil (frustration alerts must not thread)", capturedBody.Thread)
+	}
+}
+
+// TestFrustrationLabelAndColor pins the band thresholds and that High/
+// Critical reuse severityDisplay's exact orange/red (dispatch.go).
+func TestFrustrationLabelAndColor(t *testing.T) {
+	cases := []struct {
+		level     float64
+		wantLabel string
+		wantColor string
+	}{
+		{1.00, "Critical", "#DC2626"},
+		{0.90, "Critical", "#DC2626"},
+		{0.89, "High", "#F97316"},
+		{0.70, "High", "#F97316"},
+		{0.69, "Moderate", "#D97706"},
+		{0.40, "Moderate", "#D97706"},
+		{0.39, "Mild", "#16A34A"},
+		{0.00, "Mild", "#16A34A"},
+	}
+	for _, c := range cases {
+		label, color := frustrationLabelAndColor(c.level)
+		if label != c.wantLabel || color != c.wantColor {
+			t.Errorf("frustrationLabelAndColor(%.2f) = (%q, %q), want (%q, %q)", c.level, label, color, c.wantLabel, c.wantColor)
+		}
 	}
 }
 
@@ -449,6 +503,45 @@ func TestGoogleChatClient_HasAudienceSpace(t *testing.T) {
 	}
 	if c.HasAudienceSpace("Castor") {
 		t.Error("HasAudienceSpace(\"Castor\") = true, want false for an unconfigured audience")
+	}
+}
+
+// TestGoogleChatClient_SetTeamAudienceSpaces pins the team-sourced routing
+// path (entity-service's team.chat_webhook_url, refreshed periodically —
+// see cmd/server/main.go) alongside the static, config-sourced one: a team
+// with no static GOOGLE_CHAT_SPACES entry resolves once its webhook is set
+// dynamically, a later call fully replaces the set (not merges into it), and
+// a static entry wins over a same-named dynamic one.
+func TestGoogleChatClient_SetTeamAudienceSpaces(t *testing.T) {
+	c := NewGoogleChatClient(GoogleChatConfig{AudienceSpaces: []GoogleChatAudienceSpace{
+		{Audience: "Incident Monitor", WebhookURL: "https://example.com/incident-monitor"},
+		{Audience: "Apollo", WebhookURL: "https://example.com/apollo-static"},
+	}})
+
+	if c.HasAudienceSpace("Castor") {
+		t.Fatal("HasAudienceSpace(\"Castor\") = true before any team-sourced space was set")
+	}
+
+	c.SetTeamAudienceSpaces(map[string]string{
+		"Castor": "https://example.com/castor-dynamic",
+		"Apollo": "https://example.com/apollo-dynamic",
+	})
+
+	if !c.HasAudienceSpace("Castor") {
+		t.Error("HasAudienceSpace(\"Castor\") = false after SetTeamAudienceSpaces added it")
+	}
+	if url, _ := c.webhookURLFor("Apollo"); url != "https://example.com/apollo-static" {
+		t.Errorf("a static GOOGLE_CHAT_SPACES entry should win over a same-named dynamic one, got %q", url)
+	}
+	if !c.HasAudienceSpace("Incident Monitor") {
+		t.Error("the standing, config-sourced audience must stay routable alongside team-sourced ones")
+	}
+
+	// A later call replaces, it does not merge: Castor must disappear once a
+	// refresh no longer reports it (e.g. the operator cleared the webhook).
+	c.SetTeamAudienceSpaces(map[string]string{"Apollo": "https://example.com/apollo-dynamic"})
+	if c.HasAudienceSpace("Castor") {
+		t.Error("HasAudienceSpace(\"Castor\") = true after a refresh that no longer reports it")
 	}
 }
 

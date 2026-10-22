@@ -61,6 +61,40 @@ const (
 	DataSourcePostgresServiceNowDualWrite DataSource = "postgres-servicenow-dual-write"
 )
 
+// UsageReadMode selects how the instance and usage/metrics reads are routed
+// under DATA_SOURCE=postgres-servicenow-dual-write. The covered reads are
+// InstanceService's five methods and DeployedProductService's
+// SearchDeployedProductMetrics/SearchDeployedProductUsageCounts.
+// UsageReadRoute is the single place that turns DataSource + UsageReadMode
+// into a routing decision. Other DATA_SOURCE values are not affected by it.
+type UsageReadMode string
+
+const (
+	// UsageReadModePostgres always reads these from Postgres (except
+	// instances under DATA_SOURCE=servicenow, which has no pool). The default.
+	UsageReadModePostgres UsageReadMode = "postgres"
+	// UsageReadModeLegacy restores the previous read routing: under
+	// DATA_SOURCE=postgres-servicenow-dual-write these reads go to the
+	// backing system the dual-write mode mirrors to, not to Postgres.
+	UsageReadModeLegacy UsageReadMode = "legacy"
+)
+
+// UsageReadRoute is the read source UsageReadRoute picks for the instance and
+// usage/metrics reads.
+type UsageReadRoute int
+
+const (
+	// UsageReadRoutePostgres reads this service's own Postgres tables.
+	UsageReadRoutePostgres UsageReadRoute = iota
+	// UsageReadRouteServiceNowOnly is DATA_SOURCE=servicenow: the whole
+	// service is backed by the integration service, there is no Postgres.
+	UsageReadRouteServiceNowOnly
+	// UsageReadRoutePreviousPathFallback is the legacy dual-write routing:
+	// Postgres-backed service whose usage/metrics reads are delegated to the
+	// mirror service.
+	UsageReadRoutePreviousPathFallback
+)
+
 // SLADataSource identifies which backend SLA-related reads use -- task SLAs
 // (GET /slas/{id}, POST /slas/search, what backs a case's SLA display) and
 // the slaBreached/taskSLABusinessElapsedPercent case-search filters, and the
@@ -122,6 +156,17 @@ type Config struct {
 	// uses — it is the system zone, NOT the commitment's recorded one.
 	AvailabilityTimezone string
 
+	// WorklogReportTeamTypes scopes the CS Worklogs reports: the
+	// team.type values whose teams get a section. Defaults to the CRE
+	// delivery teams, which is what the delivered mails cover -- the
+	// SME and SRE teams appear in neither.
+	WorklogReportTeamTypes []string
+	// WorklogReportExcludedTeamKeys drops individual teams from that
+	// scope by key. A type filter is broad by nature and catches teams
+	// nobody wants in the report; this takes them out without
+	// narrowing the type list to the point of brittleness.
+	WorklogReportExcludedTeamKeys []string
+
 	DBUser     string
 	DBPassword string
 	DBName     string
@@ -171,6 +216,10 @@ type Config struct {
 	// independent of DataSource. Defaults to "postgres" -- see
 	// SLADataSource's own doc comment.
 	SLADataSource SLADataSource
+	// UsageReadMode selects the read routing of the instance and
+	// usage/metrics reads under DATA_SOURCE=postgres-servicenow-dual-write.
+	// Defaults to "postgres" -- see UsageReadMode's own doc comment.
+	UsageReadMode UsageReadMode
 	// AttachmentDataSource controls which backend two case attachment reads
 	// and the activity feed use, independent of DataSource and
 	// SLADataSource. Defaults to "postgres" -- see AttachmentDataSource's
@@ -431,6 +480,15 @@ type Config struct {
 	// recipients is not swept at all, so its decisions are not used up.
 	OutageNotificationRecipients  []string
 	OutageCommunicationRecipients []string
+	// MigrationCaseReportHoldTag and MigrationCaseReportAccountsTag are the
+	// tag names (matched ignoring case) that place a long-running migration
+	// in the weekly scan's "customer asked to hold" and "waiting on the
+	// accounts team" tables. MigrationCaseReportTeamKeys are the teams whose
+	// mail groups (team.group_email) receive the scan; empty means the scan
+	// derives no recipients and the scheduled task must configure its own.
+	MigrationCaseReportHoldTag     string
+	MigrationCaseReportAccountsTag string
+	MigrationCaseReportTeamKeys    []string
 	// CustomerRoles is a comma-separated list of ServiceNow role names
 	// (organisation-specific vocabulary, the same reasoning
 	// apps/csm-portal/backend's own CSM_TEAM_REGISTRY uses for not shipping
@@ -644,6 +702,18 @@ type Config struct {
 	SalesEntityClientSecret string
 	SalesEntityScopes       string
 
+	// SCIM* is the Choreo connection to the WSO2 internal-org SCIM search API
+	// (POST /organizations/internal/users/search), used by the Salesforce
+	// Account ingest to auto-provision a CSM "user" row for an account person
+	// reference (owner, technical owner, etc.) that has no match by email yet.
+	// The four connection fields are all-or-nothing like SalesEntity*; Scopes
+	// is optional.
+	SCIMBaseURL      string
+	SCIMTokenURL     string
+	SCIMClientID     string
+	SCIMClientSecret string
+	SCIMScopes       string
+
 	// Escalation* are the fixed EL1/EL2 case-escalation notification
 	// recipients EscalationService.CreateEscalation (Postgres data sources)
 	// adds to the per-case ones -- see EscalationRepository.CreateEscalation's
@@ -727,9 +797,12 @@ func Load() *Config {
 		return n
 	}
 	cfg := &Config{
-		DBHost:                                   getEnvOrDefault("DB_HOST", "localhost"),
-		DBPort:                                   getEnvOrDefault("DB_PORT", "5432"),
-		AvailabilityTimezone:                     os.Getenv("AVAILABILITY_TIMEZONE"),
+		DBHost:               getEnvOrDefault("DB_HOST", "localhost"),
+		DBPort:               getEnvOrDefault("DB_PORT", "5432"),
+		AvailabilityTimezone: os.Getenv("AVAILABILITY_TIMEZONE"),
+		WorklogReportTeamTypes: splitCommaOrDefault(
+			os.Getenv("WORKLOG_REPORT_TEAM_TYPES"), []string{"cre-abt", "cre"}),
+		WorklogReportExcludedTeamKeys:            splitComma(os.Getenv("WORKLOG_REPORT_EXCLUDED_TEAM_KEYS")),
 		DBUser:                                   os.Getenv("DB_USER"),
 		DBPassword:                               os.Getenv("DB_PASSWORD"),
 		DBName:                                   os.Getenv("DB_NAME"),
@@ -743,6 +816,7 @@ func Load() *Config {
 		HealthPort:                               getEnvOrDefault("HEALTH_PORT", "8081"),
 		DataSource:                               DataSource(getEnvOrDefault("DATA_SOURCE", string(DataSourcePostgres))),
 		SLADataSource:                            SLADataSource(getEnvOrDefault("SLA_DATA_SOURCE", string(SLADataSourcePostgres))),
+		UsageReadMode:                            UsageReadMode(getEnvOrDefault("PRODUCT_CONSUMPTION_DATA_READ_MODE", string(UsageReadModePostgres))),
 		AttachmentDataSource:                     AttachmentDataSource(getEnvOrDefault("ATTACHMENT_DATA_SOURCE", string(AttachmentDataSourcePostgres))),
 		ServiceNowIntegrationServiceBaseURL:      os.Getenv("SERVICENOW_INTEGRATION_SERVICE_BASE_URL"),
 		ServiceNowIntegrationServiceTokenURL:     os.Getenv("SERVICENOW_INTEGRATION_SERVICE_TOKEN_URL"),
@@ -784,6 +858,9 @@ func Load() *Config {
 		OutageNoticePollInterval:                      envDuration("OUTAGE_NOTICE_POLL_INTERVAL", 60*time.Second),
 		OutageNotificationRecipients:                  splitComma(os.Getenv("OUTAGE_NOTIFICATION_RECIPIENTS")),
 		OutageCommunicationRecipients:                 splitComma(os.Getenv("OUTAGE_COMMUNICATION_RECIPIENTS")),
+		MigrationCaseReportHoldTag:                    getEnvOrDefault("MIGRATION_CASE_REPORT_HOLD_TAG", "s_mig_hold"),
+		MigrationCaseReportAccountsTag:                getEnvOrDefault("MIGRATION_CASE_REPORT_ACCOUNTS_TAG", "s_acc"),
+		MigrationCaseReportTeamKeys:                   splitComma(os.Getenv("MIGRATION_CASE_REPORT_TEAM_KEYS")),
 		AuthIssuer:                                    os.Getenv("AUTH_ISSUER"),
 		AuthJWKSURL:                                   os.Getenv("AUTH_JWKS_URL"),
 		AuthUserTokenAudiences:                        splitComma(os.Getenv("AUTH_USER_TOKEN_AUDIENCES")),
@@ -809,6 +886,11 @@ func Load() *Config {
 		SalesEntityClientID:                           os.Getenv("SALES_ENTITY_CLIENT_ID"),
 		SalesEntityClientSecret:                       os.Getenv("SALES_ENTITY_CLIENT_SECRET"),
 		SalesEntityScopes:                             os.Getenv("SALES_ENTITY_SCOPES"),
+		SCIMBaseURL:                                   os.Getenv("SCIM_BASE_URL"),
+		SCIMTokenURL:                                  os.Getenv("SCIM_TOKEN_URL"),
+		SCIMClientID:                                  os.Getenv("SCIM_CLIENT_ID"),
+		SCIMClientSecret:                              os.Getenv("SCIM_CLIENT_SECRET"),
+		SCIMScopes:                                    os.Getenv("SCIM_SCOPES"),
 		CSMMigrationMembershipRegistrationEnabled:     envFlagOn("CSM_MIGRATION_MEMBERSHIP_REGISTRATION_ENABLED"),
 		EscalationEL1AmericasTLEmails:                 splitComma(os.Getenv("ESCALATION_EL1_AMERICAS_TL_EMAILS")),
 		EscalationEL2AmericasTUEmails:                 splitComma(os.Getenv("ESCALATION_EL2_AMERICAS_TU_EMAILS")),
@@ -952,6 +1034,17 @@ func splitComma(s string) []string {
 	return result
 }
 
+// splitCommaOrDefault is splitComma with a fallback, for a list whose
+// empty value would mean something materially different from its
+// intended default -- an unset team-type scope would widen a report to
+// every team rather than narrow it to none.
+func splitCommaOrDefault(s string, def []string) []string {
+	if v := splitComma(s); len(v) > 0 {
+		return v
+	}
+	return def
+}
+
 // HasDatabase reports whether a Postgres connection is configured. It is the
 // gate cmd/api/main.go uses to decide whether to open a pool at all, and
 // routes.go uses to decide whether to register the Postgres-only endpoints
@@ -1036,6 +1129,12 @@ func (c *Config) Validate() error {
 		// valid
 	default:
 		return fmt.Errorf("invalid SLA_DATA_SOURCE %q: must be %q or %q", c.SLADataSource, SLADataSourcePostgres, SLADataSourceServiceNow)
+	}
+	switch c.UsageReadMode {
+	case UsageReadModePostgres, UsageReadModeLegacy:
+		// valid
+	default:
+		return fmt.Errorf("invalid PRODUCT_CONSUMPTION_DATA_READ_MODE %q: must be %q or %q", c.UsageReadMode, UsageReadModePostgres, UsageReadModeLegacy)
 	}
 	switch c.AttachmentDataSource {
 	case AttachmentDataSourcePostgres, AttachmentDataSourceServiceNow:
@@ -1130,6 +1229,10 @@ func (c *Config) Validate() error {
 	salesEntitySet := c.SalesEntityBaseURL != "" || c.SalesEntityTokenURL != "" || c.SalesEntityClientID != "" || c.SalesEntityClientSecret != "" || c.SalesEntityScopes != ""
 	if salesEntitySet && !c.SalesEntityConfigured() {
 		return fmt.Errorf("SALES_ENTITY_BASE_URL, SALES_ENTITY_TOKEN_URL, SALES_ENTITY_CLIENT_ID, and SALES_ENTITY_CLIENT_SECRET must be set together or not at all")
+	}
+	scimSet := c.SCIMBaseURL != "" || c.SCIMTokenURL != "" || c.SCIMClientID != "" || c.SCIMClientSecret != "" || c.SCIMScopes != ""
+	if scimSet && !c.SCIMConfigured() {
+		return fmt.Errorf("SCIM_BASE_URL, SCIM_TOKEN_URL, SCIM_CLIENT_ID, and SCIM_CLIENT_SECRET must be set together or not at all")
 	}
 	if (c.CSMPortalBackendClientID == "") != (c.CSMPortalUserDomain == "") {
 		return fmt.Errorf("CSM_PORTAL_BACKEND_CLIENT_ID and CSM_PORTAL_USER_DOMAIN must be set together or not at all")
@@ -1241,6 +1344,25 @@ func (c *Config) CaseEscalationNoticesOn() bool {
 	return c.PostgresAuthoritative() && c.CaseEscalationNotices != "false"
 }
 
+// UsageReadRoute decides where the instance and usage/metrics reads are
+// served from, from DataSource and UsageReadMode. It is the only place that
+// decision is made; routes.go wires services from its result.
+//
+//	DATA_SOURCE=servicenow                                -> ServiceNowOnly (either mode)
+//	DATA_SOURCE=postgres                                  -> Postgres (either mode)
+//	DATA_SOURCE=postgres-servicenow-dual-write, postgres  -> Postgres
+//	DATA_SOURCE=postgres-servicenow-dual-write, legacy    -> PreviousPathFallback
+func (c *Config) UsageReadRoute() UsageReadRoute {
+	switch {
+	case c.DataSource == DataSourceServiceNow:
+		return UsageReadRouteServiceNowOnly
+	case c.DataSource == DataSourcePostgresServiceNowDualWrite && c.UsageReadMode == UsageReadModeLegacy:
+		return UsageReadRoutePreviousPathFallback
+	default:
+		return UsageReadRoutePostgres
+	}
+}
+
 func (c *Config) PostgresAuthoritative() bool {
 	return c.DataSource == DataSourcePostgres || c.DataSource == DataSourcePostgresServiceNowDualWrite
 }
@@ -1270,6 +1392,14 @@ func (c *Config) SalesEntityConfigured() bool {
 		c.SalesEntityTokenURL != "" &&
 		c.SalesEntityClientID != "" &&
 		c.SalesEntityClientSecret != ""
+}
+
+// SCIMConfigured reports whether every WSO2 internal-org SCIM search env var is set.
+func (c *Config) SCIMConfigured() bool {
+	return c.SCIMBaseURL != "" &&
+		c.SCIMTokenURL != "" &&
+		c.SCIMClientID != "" &&
+		c.SCIMClientSecret != ""
 }
 
 // DSN constructs a PostgreSQL connection string from the config fields.

@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
+	"os"
 	"slices"
 	"sort"
 	"strings"
@@ -62,6 +63,15 @@ var (
 
 // caseAlertKeys are the ladder values, by the file's name.
 var caseAlertKeys = map[string]caseAlertKey{
+	// The ladder's own switches (whether it runs, how it reaches people, and
+	// the safety holds). The file's top-level enabled and the
+	// INCIDENT_ESCALATION_ENABLED kill switch stay outside the tab.
+	"enabled":                           boolKey(caseAlertBoth, func(l *LadderConfig) *bool { return &l.Enabled }),
+	"channel":                           channelKey(caseAlertBoth, func(l *LadderConfig) *Channel { return &l.Channel }),
+	"safety.maxCallsPerLadder":          intKey(caseAlertBoth, func(l *LadderConfig) *int { return &l.Safety.MaxCallsPerLadder }),
+	"safety.callWithoutVerifiedLeads":   boolKey(caseAlertBoth, func(l *LadderConfig) *bool { return &l.Safety.CallWithoutVerifiedLeads }),
+	"safety.callHeadsWithoutLowerTiers": boolKey(caseAlertBoth, func(l *LadderConfig) *bool { return &l.Safety.CallHeadsWithoutLowerTiers }),
+
 	"trigger.priorities":       listKey(caseAlertBoth, func(l *LadderConfig) *[]string { return &l.Start.Priorities }),
 	"trigger.teams":            listKey(caseAlertBoth, func(l *LadderConfig) *[]string { return &l.Start.Teams }),
 	"trigger.excludeTeams":     listKey(caseAlertBoth, func(l *LadderConfig) *[]string { return &l.Start.ExcludeTeams }),
@@ -150,9 +160,18 @@ type smeCaseAlertKey struct {
 	get func(s SMEConfig) (any, bool)
 }
 
-// smeCaseAlertKeys are the SME page's values, by the file's name. Whether it
-// runs, its channel, safety and chat rooms are not among them.
+// smeCaseAlertKeys are the SME page's values, by the file's name, including
+// whether it runs and its channel. Its safety and chat rooms are not among
+// them (rooms are saved as rooms).
 var smeCaseAlertKeys = map[string]smeCaseAlertKey{
+	"enabled": {
+		set: func(s *SMEConfig, raw json.RawMessage) error { return strictJSON(raw, &s.Enabled) },
+		get: func(s SMEConfig) (any, bool) { return s.Enabled, true },
+	},
+	"channel": {
+		set: func(s *SMEConfig, raw json.RawMessage) error { return setChannel(raw, &s.Channel) },
+		get: func(s SMEConfig) (any, bool) { return channelValue(s.Channel), true },
+	},
 	"timing.initialWait": smeDurationKey(func(s *SMEConfig) *Duration { return &s.Timing.InitialWait }, true),
 	"timing.interval":    smeDurationKey(func(s *SMEConfig) *Duration { return &s.Timing.Interval }, false),
 	"onLeave": {
@@ -261,6 +280,43 @@ func boolKey(ladders []string, field func(*LadderConfig) *bool) caseAlertKey {
 		},
 		get: func(l LadderConfig) (any, bool) { return *field(&l), true },
 	}
+}
+
+// channelKey is a ladder's channel: call, chat, both or log.
+func channelKey(ladders []string, field func(*LadderConfig) *Channel) caseAlertKey {
+	return caseAlertKey{
+		ladders: ladders,
+		set:     func(l *LadderConfig, raw json.RawMessage) error { return setChannel(raw, field(l)) },
+		get:     func(l LadderConfig) (any, bool) { return channelValue(*field(&l)), true },
+	}
+}
+
+// setChannel reads a saved channel; anything but call, chat, both or log is
+// refused, so the merge keeps the file.
+func setChannel(raw json.RawMessage, dst *Channel) error {
+	var v string
+	if err := strictJSON(raw, &v); err != nil {
+		return err
+	}
+	if strings.TrimSpace(v) == "" {
+		return fmt.Errorf("a channel is required: call, chat, both or log")
+	}
+	ch, err := ParseChannel(v)
+	if err != nil {
+		return err
+	}
+	*dst = ch
+	return nil
+}
+
+// channelValue is a channel as reported: unset reads as call, the code's
+// default.
+func channelValue(c Channel) string {
+	ch, err := ParseChannel(string(c))
+	if err != nil {
+		return string(c)
+	}
+	return string(ch)
 }
 
 func intKey(ladders []string, field func(*LadderConfig) *int) caseAlertKey {
@@ -479,11 +535,14 @@ func compactJSON(v any) string {
 
 func sameJSON(a, b any) bool { return compactJSON(a) == compactJSON(b) }
 
-// fileOnlyCaseAlertValues is what only the file can set, shown read-only on
-// the tab so nobody has to open the file to see what a ladder may do: whether
-// it runs, its channel, its caps, where numbers come from. The allowed
-// numbers are counted, never listed.
-func fileOnlyCaseAlertValues(cfg Config, l LadderConfig) map[string]any {
+// fileOnlyCaseAlertValues is what only the file (or the code) sets, shown
+// read-only on the tab so nobody has to open the file to see what a ladder may
+// do: whether it runs, its channel, its caps, where numbers come from, and
+// whether it replies when it stops. For CRE also the rung emails, whether the
+// rule table is the built-in one, and when each step is called. The allowed
+// numbers are counted, never listed; the rung emails' lists are counted or
+// flagged, never their addresses.
+func fileOnlyCaseAlertValues(cfg Config, ladder string, l LadderConfig) map[string]any {
 	out := map[string]any{
 		"enabled":                           cfg.Enabled && l.Enabled,
 		"channel":                           string(l.Channel),
@@ -492,9 +551,38 @@ func fileOnlyCaseAlertValues(cfg Config, l LadderConfig) map[string]any {
 		"safety.callWithoutVerifiedLeads":   l.Safety.CallWithoutVerifiedLeads,
 		"safety.callHeadsWithoutLowerTiers": l.Safety.CallHeadsWithoutLowerTiers,
 		"phones.source":                     l.PhoneSource(),
+		"ackChat":                           l.AckChatOn(),
 	}
 	if lvl, capped := l.CapLevel(); capped {
 		out["safety.maxLevel"] = int(lvl)
+	}
+	if ladder == "CRE" {
+		out["email.enabled"] = l.Email.Enabled
+		out["email.teamLists"] = len(l.Email.TeamLists)
+		out["email.creTeamList"] = strings.TrimSpace(l.Email.CRETeamList) != ""
+		out["email.csTeamList"] = strings.TrimSpace(l.Email.CSTeamList) != ""
+		out["rules.custom"] = len(l.Rules) > 0
+		out["timing"] = creChainTiming(DefaultPolicy)
+	}
+	return out
+}
+
+// creChainTiming is when each step of the CRE chain is called, by severity:
+// minutes after the case is created, one list per step L0 to L4. It comes from
+// the policy the CRE engine runs on, so the tab cannot drift from the code.
+// Every CRE rule has an L0 step, so L0 is always included.
+func creChainTiming(policies map[string]PriorityPolicy) map[string][][]int {
+	out := map[string][][]int{}
+	for i, sev := range []string{"S0", "S1", "S2", "S3", "S4"} {
+		p, ok := policies[fmt.Sprintf("P%d", i)]
+		if !ok {
+			continue
+		}
+		steps := make([][]int, int(Level4)+1)
+		for _, a := range Schedule(p, true) {
+			steps[a.Level] = append(steps[a.Level], int(a.After/time.Minute))
+		}
+		out[sev] = steps
 	}
 	return out
 }
@@ -507,7 +595,7 @@ func fileOnlyCaseAlertValues(cfg Config, l LadderConfig) map[string]any {
 func RunningCaseAlertValues(cfg Config, saved map[string]map[string]bool) map[string]any {
 	fileOnly := map[string]any{}
 	for _, ladder := range caseAlertBoth {
-		fileOnly[ladder] = fileOnlyCaseAlertValues(cfg, *ladderFor(&cfg, ladder))
+		fileOnly[ladder] = fileOnlyCaseAlertValues(cfg, ladder, *ladderFor(&cfg, ladder))
 	}
 	fileOnly["SME"] = map[string]any{
 		"enabled":               cfg.Enabled && cfg.SME.Enabled,
@@ -547,5 +635,129 @@ func RunningCaseAlertValues(cfg Config, saved map[string]map[string]bool) map[st
 		}
 		ladders[ladder] = out
 	}
-	return map[string]any{"ladders": ladders, "fileOnly": fileOnly}
+	return map[string]any{"ladders": ladders, "fileOnly": fileOnly, "channels": EffectiveChannels(cfg), "groups": CaseAlertGroupRouting(cfg)}
+}
+
+// GroupRouting is how one ladder sends an assignment group to a team as the
+// service runs now: the file's teams.aliases and teams.defaultGroups with the
+// saved routes merged in (a route to a team is an alias, a route to a rota a
+// default group). Group names are lower-cased and trimmed, as the resolver
+// matches them; teams are team keys. TeamlessRooms are the SRE team rooms a
+// default group's cards go to (sre.teamlessChats); empty, they go to the
+// ladder's shared room. The tab uses it to say where each assignment group's
+// alerts go, and which groups nothing routes.
+type GroupRouting struct {
+	Aliases       map[string]string `json:"aliases"`
+	DefaultGroups []string          `json:"defaultGroups"`
+	TeamlessRooms []string          `json:"teamlessRooms"`
+	// GroupRooms are the groups with a chat room of their own
+	// (sre.groupChats), lower-cased. SRE only.
+	GroupRooms []string `json:"groupRooms,omitempty"`
+	// SharedRoom is whether the ladder has its shared room (sre.chat), where
+	// a group that maps to no room gets its card: its variable is set, or it
+	// names an audience. SRE only; absent from an older report.
+	SharedRoom *bool `json:"sharedRoom,omitempty"`
+}
+
+// chatConfigured reports whether a chat section can be posted to: its
+// variable holds a URL, or (with no variable) it names an audience, whose
+// GOOGLE_CHAT_SPACES entry is not checked here.
+func chatConfigured(c Chat) bool {
+	if name := strings.TrimSpace(c.WebhookURLEnv); name != "" {
+		return strings.TrimSpace(os.Getenv(name)) != ""
+	}
+	return strings.TrimSpace(c.Audience) != ""
+}
+
+// CaseAlertGroupRouting reports GroupRouting for the CRE and SRE ladders.
+// Only SRE has default groups and teamless rooms.
+func CaseAlertGroupRouting(cfg Config) map[string]GroupRouting {
+	out := map[string]GroupRouting{}
+	for _, ladder := range caseAlertBoth {
+		l := ladderFor(&cfg, ladder)
+		g := GroupRouting{Aliases: map[string]string{}, DefaultGroups: []string{}, TeamlessRooms: []string{}}
+		for group, team := range l.Teams.Aliases {
+			if k := teamKeyFor(group); k != "" && teamKeyFor(team) != "" {
+				g.Aliases[k] = teamKeyFor(team)
+			}
+		}
+		if ladder == "SRE" {
+			for _, d := range l.Teams.DefaultGroups {
+				if k := teamKeyFor(d); k != "" && !slices.Contains(g.DefaultGroups, k) {
+					g.DefaultGroups = append(g.DefaultGroups, k)
+				}
+			}
+			for _, k := range l.TeamlessChats {
+				if k = teamKeyFor(k); k != "" && !slices.Contains(g.TeamlessRooms, k) {
+					g.TeamlessRooms = append(g.TeamlessRooms, k)
+				}
+			}
+			sort.Strings(g.DefaultGroups)
+			for group := range l.GroupChats {
+				if k := teamKeyFor(group); k != "" {
+					g.GroupRooms = append(g.GroupRooms, k)
+				}
+			}
+			sort.Strings(g.GroupRooms)
+			shared := chatConfigured(l.Chat)
+			g.SharedRoom = &shared
+		}
+		out[ladder] = g
+	}
+	return out
+}
+
+// EffectiveChannel is how one ladder, or one team on it, reaches people as
+// the service runs now: the ladder's channel narrowed by the team's own (an
+// SRE team's saved channel can only drop calls or chat, never add one).
+type EffectiveChannel struct {
+	Team        string `json:"team,omitempty"`
+	Channel     string `json:"channel"`
+	TeamChannel string `json:"teamChannel,omitempty"`
+	Room        bool   `json:"room"`
+}
+
+// LadderChannels is one ladder's switches as running, and its teams.
+type LadderChannels struct {
+	Enabled bool               `json:"enabled"`
+	Channel string             `json:"channel"`
+	Teams   []EffectiveChannel `json:"teams"`
+}
+
+// EffectiveChannels reports, per ladder, whether it runs, its channel, and
+// for each SRE and SME team the channel it actually uses and whether it has
+// a room of its own. CRE teams have no channel of their own.
+func EffectiveChannels(cfg Config) map[string]LadderChannels {
+	out := map[string]LadderChannels{
+		"CRE": {Enabled: cfg.Enabled && cfg.CRE.Enabled, Channel: channelValue(cfg.CRE.Channel), Teams: []EffectiveChannel{}},
+	}
+	sre := LadderChannels{Enabled: cfg.Enabled && cfg.SRE.Enabled, Channel: channelValue(cfg.SRE.Channel), Teams: []EffectiveChannel{}}
+	ladderCh, _ := ParseChannel(string(cfg.SRE.Channel))
+	keys := map[string]bool{}
+	for _, k := range cfg.SRE.Teams.ABTs {
+		keys[teamKeyFor(k)] = true
+	}
+	for k := range cfg.SRE.TeamChats {
+		keys[teamKeyFor(k)] = true
+	}
+	for k := range cfg.SRE.TeamChannels {
+		keys[teamKeyFor(k)] = true
+	}
+	for _, k := range slices.Sorted(maps.Keys(keys)) {
+		if k == "" {
+			continue
+		}
+		own := cfg.SRE.TeamChannels[k]
+		_, room := cfg.SRE.TeamChats[k]
+		sre.Teams = append(sre.Teams, EffectiveChannel{
+			Team: k, Channel: string(narrowChannel(ladderCh, own)), TeamChannel: string(own), Room: room,
+		})
+	}
+	out["SRE"] = sre
+	sme := LadderChannels{Enabled: cfg.Enabled && cfg.SME.Enabled, Channel: channelValue(cfg.SME.Channel), Teams: []EffectiveChannel{}}
+	for _, k := range slices.Sorted(maps.Keys(cfg.SME.TeamChats)) {
+		sme.Teams = append(sme.Teams, EffectiveChannel{Team: teamKeyFor(k), Channel: sme.Channel, Room: true})
+	}
+	out["SME"] = sme
+	return out
 }

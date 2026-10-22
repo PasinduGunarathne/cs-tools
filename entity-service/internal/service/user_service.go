@@ -242,11 +242,18 @@ func validateSearchQuery(q string) error {
 
 type userService struct {
 	repo repository.UserRepository
+	// access gates UpdateUser to internal callers only -- see that method's
+	// own doc comment for why this write needs stricter gating than PatchMe
+	// (a user editing their own profile). nil is safe for every other
+	// method, which never reads it -- only tests that don't exercise
+	// UpdateUser pass nil.
+	access AccessService
 }
 
-// NewUserService constructs a UserService backed by the given repository.
-func NewUserService(repo repository.UserRepository) UserService {
-	return &userService{repo: repo}
+// NewUserService constructs a UserService backed by the given repository and
+// access service.
+func NewUserService(repo repository.UserRepository, access AccessService) UserService {
+	return &userService{repo: repo, access: access}
 }
 
 // GetUser implements UserService.
@@ -334,11 +341,13 @@ func (s *userService) SearchUsers(ctx context.Context, req domain.SearchUsersReq
 //
 // Postgres has role/user_role tables (migrations 0008/0010 -- see
 // SearchUsers' roleIds filter, which does query them) and no group-membership
-// table at all. GetMe doesn't resolve either here: Roles is left empty rather
-// than queried, since no caller has asked for it on this path yet, and Groups
-// is always empty because there is genuinely nothing to resolve it from —
-// the frontend's team/role resolution is simply a no-op for this data source
-// today.
+// table at all. GetMe doesn't resolve groups here: Groups is always empty
+// because there is genuinely nothing to resolve it from — the frontend's
+// team resolution is simply a no-op for this data source today. UserType IS
+// populated (straight from GetUserByEmail's own already-resolved value) --
+// a caller (apps/customer-portal/backend-v2's internal-write-group gate, for
+// one) relies on it to tell an INTERNAL-classified caller apart from a
+// genuine customer/partner.
 func (s *userService) GetMe(ctx context.Context) (domain.GetUserMeResponse, error) {
 	token := middleware.UserIDTokenFromContext(ctx)
 	if token == "" {
@@ -380,6 +389,7 @@ func (s *userService) GetMe(ctx context.Context) (domain.GetUserMeResponse, erro
 		LastName:  user.LastName,
 		TimeZone:  user.Timezone,
 		Phone:     user.Phone,
+		UserType:  user.UserType,
 		Roles:     roles,
 		Groups:    groups,
 	}, nil
@@ -465,6 +475,61 @@ func (s *userService) PatchMe(ctx context.Context, req domain.PatchUserMeRequest
 	}, nil
 }
 
+// UpdateUser implements UserService. Unlike PatchMe, userID comes from the
+// caller (a portal admin acting on someone else's profile), not resolved
+// from the caller's own token -- so this is gated to internal callers only,
+// never reachable by an ordinary authenticated end user for an arbitrary id.
+// Fine-grained authorization beyond "internal service" (e.g. Asgardeo admin
+// only) is the caller's job (apps/csm-portal/backend), same posture as
+// TeamService.AssignTeamLead.
+func (s *userService) UpdateUser(ctx context.Context, userID string, req domain.UpdateUserRequest) (domain.PatchUserMeResponse, error) {
+	if err := RequireInternalCaller(ctx, s.access, "updating another user's profile is only available to internal services"); err != nil {
+		return domain.PatchUserMeResponse{}, err
+	}
+	if err := validateUUIDs("id", []string{userID}); err != nil {
+		return domain.PatchUserMeResponse{}, err
+	}
+	var timezone, phone *string
+	if req.TimeZone != nil {
+		if trimmedTZ := strings.TrimSpace(*req.TimeZone); trimmedTZ != "" {
+			timezone = &trimmedTZ
+		}
+	}
+	if req.Phone != nil {
+		trimmed := strings.TrimSpace(*req.Phone)
+		if utf8.RuneCountInString(trimmed) > maxPhoneLen {
+			return domain.PatchUserMeResponse{}, &apierror.ValidationError{Msg: fmt.Sprintf("phone must be at most %d characters", maxPhoneLen)}
+		}
+		phone = &trimmed
+	}
+	if timezone == nil && phone == nil {
+		return domain.PatchUserMeResponse{}, &apierror.ValidationError{Msg: "at least one of timeZone or phone is required"}
+	}
+
+	updated, err := s.repo.UpdateUserProfile(ctx, userID, timezone, phone)
+	if err != nil {
+		return domain.PatchUserMeResponse{}, err
+	}
+
+	actor := "internal"
+	if token := middleware.UserIDTokenFromContext(ctx); token != "" {
+		if email, err := emailFromJWT(token); err == nil {
+			actor = email
+		}
+	}
+
+	return domain.PatchUserMeResponse{
+		Message: "User updated successfully",
+		User: domain.PatchUserMeUpdated{
+			ID:        userID,
+			UpdatedBy: actor,
+			UpdatedOn: updated.UpdatedOn.UTC().Format(time.RFC3339),
+			TimeZone:  updated.Timezone,
+			Phone:     updated.Phone,
+		},
+	}, nil
+}
+
 // CreateUser implements UserService.
 func (s *userService) CreateUser(ctx context.Context, req domain.CreateUserRequest) (domain.User, error) {
 	token := middleware.UserIDTokenFromContext(ctx)
@@ -494,4 +559,3 @@ func (s *userService) CreateUser(ctx context.Context, req domain.CreateUserReque
 
 	return s.repo.CreateUser(ctx, req, actor)
 }
-

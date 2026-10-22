@@ -116,6 +116,25 @@ func main() {
 	// independently-configurable base URLs — PRODUCT_CONSUMPTION_TRACKING_BASE_URL
 	// defaults to PRODUCT_CONSUMPTION_SUBSCRIPTION_URL when unset, for
 	// deployments where both happen to point at the same host.
+	//
+	// PRODUCT_CONSUMPTION_LICENSE_MODE selects the license flow: "service"
+	// (default when unset) makes one call to the subscription service, which
+	// owns provisioning; "legacy" drives provisioning from this backend and
+	// must be set explicitly.
+	licenseMode, err := productconsumption.ParseLicenseMode(os.Getenv(productconsumption.EnvLicenseMode))
+	if err != nil {
+		slog.Error("invalid product-consumption configuration", "err", err)
+		os.Exit(1)
+	}
+	//
+	// PRODUCT_CONSUMPTION_USAGE_IMPORT_MODE independently selects the usage
+	// import behaviour: "service" (default) requires the report's deployment to
+	// be visible to the caller; "legacy" forwards the upload unchecked.
+	usageImportMode, err := productconsumption.ParseUsageImportMode(os.Getenv(productconsumption.EnvUsageImportMode))
+	if err != nil {
+		slog.Error("invalid product-consumption configuration", "err", err)
+		os.Exit(1)
+	}
 	productConsumptionCfg := productconsumption.Config{
 		SubscriptionBaseURL: mustURL("PRODUCT_CONSUMPTION_SUBSCRIPTION_URL", "http", "https"),
 		TrackingBaseURL:     optionalURL("PRODUCT_CONSUMPTION_TRACKING_BASE_URL", "http", "https"),
@@ -123,6 +142,7 @@ func main() {
 		ClientID:            oauth2ClientID,
 		ClientSecret:        oauth2ClientSecret,
 		Scopes:              splitComma(os.Getenv("PRODUCT_CONSUMPTION_SCOPES")),
+		LicenseMode:         licenseMode,
 	}
 	productConsumptionClient := productconsumption.NewClient(productConsumptionCfg)
 
@@ -162,6 +182,15 @@ func main() {
 	// grants admin privileges for registry-token and contact management.
 	adminRole := mustEnv("AUTH_ADMIN_ROLE")
 
+	// internalWriteGroups are the JWT "groups" claim values that let an
+	// INTERNAL-type caller (entity-service's own user_type) reach a write
+	// path in this portal -- optional, and deliberately so: unset/empty means
+	// the gate is off, so every INTERNAL caller keeps full write access, the
+	// same as before this gate existed. Set it only once the real
+	// write-access group is known; until then this must not block startup or
+	// change behavior. See middleware.CachedRoleResolver.IsInternalWriteBlocked.
+	internalWriteGroups := splitComma(os.Getenv("AUTH_INTERNAL_WRITE_GROUPS"))
+
 	authCfg := middleware.Config{
 		JWKSEndpoint:          mustURL("AUTH_JWKS_ENDPOINT", "http", "https"),
 		Issuer:                mustEnv("AUTH_ISSUER"),
@@ -191,7 +220,7 @@ func main() {
 		slog.Info("CSM_MIGRATION_PORTAL_CONTACTS_ENABLED=true; project contacts are read from the CSM database and written through the entity service")
 	}
 
-	userHandler := handler.NewUserHandler(entityClient, scimClient, csmMigrationFirstAccess)
+	userHandler := handler.NewUserHandler(entityClient, scimClient, csmMigrationFirstAccess, internalWriteGroups)
 	projectHandler := handler.NewProjectHandler(entityClient)
 	projectStatsHandler := handler.NewProjectStatsHandler(entityClient)
 	caseHandler := handler.NewCaseHandler(entityClient)
@@ -207,12 +236,13 @@ func main() {
 	timeCardHandler := handler.NewTimeCardHandler(entityClient)
 	aiChatHandler := handler.NewAIChatHandler(aiChatAgentClient, entityClient)
 	webSocketHandler := handler.NewWebSocketHandler(aiChatAgentWsClient, entityClient, tokenValidator, nil)
-	productConsumptionHandler := handler.NewProductConsumptionHandler(productConsumptionClient, entityClient)
+	productConsumptionHandler := handler.NewProductConsumptionHandler(productConsumptionClient, entityClient).WithUsageImportMode(usageImportMode)
 	globalHandler := handler.NewGlobalHandler(entityClient)
+	pendingVerificationHandler := handler.NewPendingVerificationHandler(entityClient)
 	instanceHandler := handler.NewInstanceHandler(entityClient)
 	registryHandler := handler.NewRegistryHandler(entityClient, registryClient, adminRole)
 	contactHandler := handler.NewContactHandler(entityClient, userManagementClient, entityClient, csmMigrationPortalContacts)
-	roleResolver := middleware.NewCachedRoleResolver(entityClient, 5*time.Minute)
+	roleResolver := middleware.NewCachedRoleResolver(entityClient, 5*time.Minute).WithInternalWriteGroups(internalWriteGroups)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
@@ -333,6 +363,10 @@ func main() {
 
 	mux.HandleFunc("GET /metadata", globalHandler.GetMetadata)
 	mux.HandleFunc("POST /search", globalHandler.GlobalSearch)
+
+	mux.Handle("POST /pending-verifications", middleware.RequirePermission(roleResolver, middleware.ModuleCases, middleware.ActionCreate)(http.HandlerFunc(pendingVerificationHandler.CreatePendingVerification)))
+	mux.Handle("POST /pending-verifications/search", middleware.RequirePermission(roleResolver, middleware.ModuleCases, middleware.ActionRead)(http.HandlerFunc(pendingVerificationHandler.SearchPendingVerifications)))
+	mux.Handle("PATCH /pending-verifications/{id}", middleware.RequirePermission(roleResolver, middleware.ModuleCases, middleware.ActionUpdate)(http.HandlerFunc(pendingVerificationHandler.VerifyPendingVerification)))
 
 	mux.HandleFunc("POST /deployments/products/{deployedProductId}/catalogs/search", catalogHandler.SearchCatalogs)
 	mux.HandleFunc("GET /catalogs/{catalogId}/items/{itemId}", catalogHandler.GetCatalogItemVariables)

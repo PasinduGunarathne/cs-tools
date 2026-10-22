@@ -80,37 +80,96 @@ type GoogleChatConfig struct {
 // for a given deployment) — an unconfigured audience only surfaces as a
 // logged no-op the first time it's needed (see sendCardToAudience).
 type GoogleChatClient struct {
-	http                  *http.Client
-	webhookURLsByAudience map[string]string
+	http *http.Client
+	// staticAudienceSpaces are the config-sourced spaces (GOOGLE_CHAT_SPACES,
+	// INCIDENT_CHAT_SPACES, ...) — immutable after construction, same as
+	// before this type gained a second, dynamic source. Meant for the
+	// standing audiences that aren't teams at all ("Incident Monitor",
+	// "Onboarding", "Americas", "Evaluation") — see teamAudienceSpaces below
+	// for where a real team's own space now comes from instead.
+	staticAudienceSpaces map[string]string
+	// teamAudienceSpaces holds each team's own Chat webhook URL, resolved
+	// from entity-service's "team" table (team.chat_webhook_url) rather than
+	// hand-listed in GOOGLE_CHAT_SPACES — see SetTeamAudienceSpaces. Guarded
+	// by mu: cmd/server/main.go refreshes this on a ticker from a background
+	// goroutine while request-handling goroutines concurrently read it via
+	// HasAudienceSpace/sendCardToAudience.
+	mu                 sync.RWMutex
+	teamAudienceSpaces map[string]string
 	// routedIncidentSpaces are incident audiences (IncidentAudience, and
 	// IncidentFallbackAudience) taken from the Alert Settings mapping: an
 	// assignment group -> its SRE team's saved room. Set once the paging
 	// configuration is loaded (SetIncidentRouteSpaces), guarded by mu, and
-	// checked before webhookURLsByAudience, so the mapping wins over an
+	// checked before staticAudienceSpaces, so the mapping wins over an
 	// INCIDENT_CHAT_SPACES entry for the same group.
-	mu                   sync.RWMutex
 	routedIncidentSpaces map[string]string
 }
 
 // NewGoogleChatClient constructs a GoogleChatClient that routes alerts to the
-// webhook configured for each audience in cfg.AudienceSpaces.
+// webhook configured for each audience in cfg.AudienceSpaces. Starts with no
+// team-sourced spaces at all — SetTeamAudienceSpaces populates those once
+// entity-service has been reached (see that method's own doc comment); until
+// then, a team with no entry in cfg.AudienceSpaces simply has nowhere to
+// route to yet, same as any other unconfigured audience.
 func NewGoogleChatClient(cfg GoogleChatConfig) *GoogleChatClient {
-	webhookURLsByAudience := make(map[string]string, len(cfg.AudienceSpaces))
+	staticAudienceSpaces := make(map[string]string, len(cfg.AudienceSpaces))
 	for _, space := range cfg.AudienceSpaces {
 		audience := strings.TrimSpace(space.Audience)
 		if audience == "" || strings.TrimSpace(space.WebhookURL) == "" {
 			continue
 		}
-		if _, exists := webhookURLsByAudience[audience]; exists {
-			webhookURLsByAudience[audience] = ""
+		if _, exists := staticAudienceSpaces[audience]; exists {
+			staticAudienceSpaces[audience] = ""
 			continue
 		}
-		webhookURLsByAudience[audience] = space.WebhookURL
+		staticAudienceSpaces[audience] = space.WebhookURL
 	}
 	return &GoogleChatClient{
-		http:                  &http.Client{Timeout: 10 * time.Second},
-		webhookURLsByAudience: webhookURLsByAudience,
+		http:                 &http.Client{Timeout: 10 * time.Second},
+		staticAudienceSpaces: staticAudienceSpaces,
+		teamAudienceSpaces:   map[string]string{},
 	}
+}
+
+// SetTeamAudienceSpaces atomically replaces the team-sourced audience spaces
+// with spaces (team name -> Chat webhook URL, as entity.CustomerEntityClient.
+// GetTeamChatWebhooks returns), so this client always routes by whatever the
+// "team" table currently holds rather than a snapshot from process start.
+// Called periodically (not just once) from cmd/server/main.go, since an
+// operator can set a team's chat_webhook_url at any time without restarting
+// this service. A nil or empty map clears every team-sourced space — the
+// caller is expected to pass the full current set each call, not a diff.
+func (c *GoogleChatClient) SetTeamAudienceSpaces(spaces map[string]string) {
+	c.mu.Lock()
+	c.teamAudienceSpaces = spaces
+	c.mu.Unlock()
+}
+
+// webhookURLFor resolves audience to its configured Chat webhook URL, if
+// any. A routed incident audience (the Alert Settings mapping) wins first;
+// then staticAudienceSpaces (the standing, config-driven audiences) is
+// checked first and wins on a name collision — in practice there should
+// never be one, since a real team's own space now comes from
+// teamAudienceSpaces exclusively, but checking the static map first keeps a
+// deployment safe during the migration window where a team might still be
+// listed in both.
+func (c *GoogleChatClient) webhookURLFor(audience string) (string, bool) {
+	audience = strings.TrimSpace(audience)
+	if strings.HasPrefix(audience, IncidentAudiencePrefix) {
+		c.mu.RLock()
+		url := c.routedIncidentSpaces[audience]
+		c.mu.RUnlock()
+		if url != "" {
+			return url, true
+		}
+	}
+	if url, ok := c.staticAudienceSpaces[audience]; ok && url != "" {
+		return url, true
+	}
+	c.mu.RLock()
+	url, ok := c.teamAudienceSpaces[audience]
+	c.mu.RUnlock()
+	return url, ok && url != ""
 }
 
 // HasAudienceSpace reports whether audience has a real, configured Chat
@@ -149,22 +208,6 @@ func (c *GoogleChatClient) SetIncidentRouteSpaces(spaces map[string]string) {
 // never logged.
 func (c *GoogleChatClient) AudienceWebhookURL(audience string) (string, bool) {
 	return c.webhookURLFor(audience)
-}
-
-// webhookURLFor resolves audience to its webhook URL: a routed incident
-// audience first, then the configured spaces.
-func (c *GoogleChatClient) webhookURLFor(audience string) (string, bool) {
-	audience = strings.TrimSpace(audience)
-	if strings.HasPrefix(audience, IncidentAudiencePrefix) {
-		c.mu.RLock()
-		url := c.routedIncidentSpaces[audience]
-		c.mu.RUnlock()
-		if url != "" {
-			return url, true
-		}
-	}
-	url, ok := c.webhookURLsByAudience[audience]
-	return url, ok && url != ""
 }
 
 // withThreadReplyOption adds the reply option a threaded webhook message
@@ -291,6 +334,8 @@ type chatCardWidget struct {
 // reference says it always wraps. WrapText lets Text wrap instead of
 // truncating, as it would by default.
 type chatDecoratedText struct {
+	// TopLabel is a plain string drawn above Text in the same muted label style as BottomLabel.
+	TopLabel    string `json:"topLabel,omitempty"`
 	Text        string `json:"text"`
 	BottomLabel string `json:"bottomLabel,omitempty"`
 	WrapText    bool   `json:"wrapText,omitempty"`
@@ -651,6 +696,40 @@ func (c *GoogleChatClient) SendSeverityChangedAlert(ctx context.Context, audienc
 	return c.sendCardToAudience(ctx, audience, caseNumber, "", msg)
 }
 
+// frustrationBands maps a frustration score (ai-escalate-comment-detector's
+// own 0.0-1.0 scale) to a label/color pair for SendFrustrationAlert's score
+// row, highest band first (frustrationLabelAndColor stops at the first
+// min it meets or exceeds). High and Critical deliberately reuse
+// severityDisplay's exact orange/red (dispatch.go) rather than inventing a
+// new palette, so a frustration alert's color reads as the same visual
+// system as a case severity; Mild/Moderate have no case-severity color to
+// borrow (severity has no "this is fine" band), so they're new and
+// deliberately more muted than the two borrowed colors.
+var frustrationBands = []struct {
+	min          float64
+	label, color string
+}{
+	{0.90, "Critical", "#DC2626"},
+	{0.70, "High", "#F97316"},
+	{0.40, "Moderate", "#D97706"},
+	{0, "Mild", "#16A34A"},
+}
+
+// frustrationLabelAndColor resolves a frustration score to the label/color
+// frustrationBands assigns it (Critical >= 0.90, High >= 0.70, Moderate >=
+// 0.40, else Mild). A score below 0 (shouldn't happen, but this must never
+// panic on one) falls through to the last band rather than returning
+// nothing.
+func frustrationLabelAndColor(level float64) (label, color string) {
+	for _, b := range frustrationBands {
+		if level >= b.min {
+			return b.label, b.color
+		}
+	}
+	last := frustrationBands[len(frustrationBands)-1]
+	return last.label, last.color
+}
+
 // SendFrustrationAlert posts a card message for a comment
 // ai-escalate-comment-detector (internal/escalation) flagged as
 // escalation-worthy, to the Google Chat space configured for audience —
@@ -660,37 +739,74 @@ func (c *GoogleChatClient) SendSeverityChangedAlert(ctx context.Context, audienc
 // case.comment_added payload's own Team/IsEvaluationAccount/
 // ProjectOnboardingStatus fields — not the fixed-IncidentMonitor-only
 // posture SendCaseCreatedAlert's own doc comment describes for that event
-// type. Unlike the case-created/severity-changed cards above, this one keeps
-// a header (the team never leads it): case ref as the header title behind a
-// "🚨" marker, product (bold) and the frustration score on their own lines, the
-// model's own reason as plain text, then a single "View case" link.
+// type.
+//
+// Unlike every other card in this file, the frustration score — not the
+// case — is the headline, by explicit product request: the header's Title
+// is "🚨 Frustration detected" and the case reference moves into the
+// Subtitle. Chat always draws a header's Title larger/bolder than its
+// Subtitle, with no way to reorder, resize or color either field (see
+// SendCaseCreatedAlert's own doc comment on header fields not rendering
+// HTML) — swapping which string occupies which field is the only lever
+// available, and it's enough: the score needing attention reads first, which
+// case it's about reads second, the reverse of every case.*/incident.* card
+// here.
+//
+// Below the header: the score gets its own DecoratedText row (TopLabel
+// "Frustration level", a bold colored Text "<score> · <band>" from
+// frustrationLabelAndColor) rather than sharing a line with anything else —
+// the one thing on the card that needs picking out at a glance gets its own
+// line, not a shared one. No icon on that row: this file's established rule
+// (SendCaseCreatedAlert's own doc comment) is that Chat's native
+// decoratedText icon, or an inline emoji, costs a narrow screen's width with
+// no added information — this card follows the same rule rather than
+// carving out an exception.
+//
+// Then a divider, then product (bold) and the model's own reason as plain
+// text, then a "View case" button (ButtonList) — a deliberate, explicitly
+// requested exception to this file's own "navigation is a link, not a
+// button" convention for case.* cards (see SendCaseCreatedAlert's own doc
+// comment): this card gets a one-tap action the way the SR-created card's
+// own button does.
 func (c *GoogleChatClient) SendFrustrationAlert(ctx context.Context, audience, caseNumber, wso2CaseID, productName, reason string, frustrationLevel float64, caseLink string) error {
 	if caseNumber == "" {
 		return fmt.Errorf("notifications: caseNumber is required")
 	}
-	var lines []string
-	if productName != "" {
-		lines = append(lines, caseAlertLine(`<b>%s</b>`, productName))
-	}
+	label, color := frustrationLabelAndColor(frustrationLevel)
 	// caseAlertLine stringifies every arg via fmt.Sprint before escaping it
 	// (see its own doc comment) -- %.2f against the already-stringified arg
 	// would fail with a Go fmt verb mismatch (%!f(string=...)), so the float
 	// is formatted here, before caseAlertLine ever sees it, and handed in
 	// through %s like every other caseAlertLine call in this file.
-	lines = append(lines, caseAlertLine(`Frustration level: <b>%s</b>`, fmt.Sprintf("%.2f", frustrationLevel)))
+	scoreText := caseAlertLine(`<font color="%s"><b>%s</b></font> · <font color="%s"><b>%s</b></font>`,
+		color, fmt.Sprintf("%.2f", frustrationLevel), color, label)
+
+	var lines []string
+	if productName != "" {
+		lines = append(lines, caseAlertLine(`<b>%s</b>`, productName))
+	}
 	if reason != "" {
 		lines = append(lines, caseAlertLine(`%s`, reason))
 	}
-	lines = append(lines, caseAlertLine(`<a href="%s">View case</a>`, caseLink))
-	text := strings.Join(lines, "<br>")
+
+	widgets := []chatCardWidget{
+		{DecoratedText: &chatDecoratedText{TopLabel: "Frustration level", Text: scoreText, WrapText: true}},
+		{Divider: &chatDivider{}},
+	}
+	if len(lines) > 0 {
+		widgets = append(widgets, chatCardWidget{TextParagraph: &chatTextParagraph{Text: strings.Join(lines, "<br>")}})
+	}
+	widgets = append(widgets, chatCardWidget{ButtonList: &chatButtonList{Buttons: []chatButton{
+		{Text: "View case", OnClick: chatOnClick{OpenLink: chatOpenLink{URL: caseLink}}},
+	}}})
 
 	msg := chatCardMessage{
 		CardsV2: []chatCardWrapper{
 			{
 				CardID: "frustration-alert",
 				Card: chatCard{
-					Header:   &chatCardHeader{Title: "🚨 " + chatHeaderCaseRef(caseNumber, wso2CaseID), Subtitle: "Frustration detected"},
-					Sections: []chatCardSection{{Widgets: []chatCardWidget{{TextParagraph: &chatTextParagraph{Text: text}}}}},
+					Header:   &chatCardHeader{Title: "🚨 Frustration detected", Subtitle: chatHeaderCaseRef(caseNumber, wso2CaseID)},
+					Sections: []chatCardSection{{Widgets: widgets}},
 				},
 			},
 		},

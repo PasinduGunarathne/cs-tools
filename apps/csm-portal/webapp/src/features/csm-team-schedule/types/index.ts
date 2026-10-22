@@ -216,6 +216,8 @@ export interface SearchScheduleAssignmentsPayload {
   /** Widen the window to catch a block that began before `from` and is still
    *  running into it -- the night crew a day view shows at the top. */
   includeOvernight?: boolean;
+  /** Leave out anybody on leave that day: who a reminder would reach. */
+  excludeAbsent?: boolean;
 }
 
 export interface SearchScheduleAbsencesPayload {
@@ -485,6 +487,8 @@ export interface CaseAlertSettings {
 export interface CaseAlertAssignmentGroup {
   id: string;
   name: string;
+  /** The services it is the support group of. Absent from an older server. */
+  services?: string[];
 }
 
 /** A team as a route option: CRE, SRE or SME. */
@@ -514,6 +518,9 @@ export interface CaseAlertChatRoom {
   id: string;
   ladder: CaseAlertRoomLadder;
   teamKey?: string;
+  /** An SRE assignment group's own room: the group, and its current name. */
+  groupId?: string;
+  groupName?: string;
   label: string;
   enabled: boolean;
   /** Also gets the cards of an incident with no SRE team. */
@@ -572,7 +579,8 @@ export interface CaseAlertRunningValue {
 }
 
 export interface CaseAlertRunning {
-  reportedAt: string;
+  /** When the alert service reported; absent when the server has no time. */
+  reportedAt?: string;
   mode: "off" | "shadow" | "db";
   /** Per ladder, each key's value in use. */
   ladders: Partial<
@@ -581,6 +589,46 @@ export interface CaseAlertRunning {
   /** Per ladder, the settings only the file can set. Absent from an alert
    *  service that doesn't report them yet. */
   fileOnly?: Partial<Record<CaseAlertRoomLadder, CaseAlertFileOnly>>;
+  /** Per ladder, whether it runs, its channel, and each team's channel as
+   *  the alert service runs it. Absent from an alert service that doesn't
+   *  report them yet. */
+  channels?: Partial<Record<CaseAlertRoomLadder, CaseAlertLadderChannels>>;
+  /** Per ladder, how the running config routes an incident's assignment
+   *  group with no redirect saved here. Absent from an alert service that
+   *  doesn't report it yet. */
+  groups?: Partial<Record<CaseAlertLadder, CaseAlertGroupRouting>>;
+}
+
+/** How a ladder's running config routes assignment groups. */
+export interface CaseAlertGroupRouting {
+  /** Group name, lower-cased, to the team key it is alerted as. */
+  aliases?: Record<string, string>;
+  /** SRE: the groups paged on the default rota. */
+  defaultGroups?: string[];
+  /** SRE: teams with a chat space but no rota of their own. */
+  teamlessRooms?: string[];
+  /** SRE: the groups (lower-cased) with a chat space of their own in use. */
+  groupRooms?: string[];
+  /** SRE: whether the ladder has its shared space, where a group that maps
+   *  to no space gets its card. Absent from an older report. */
+  sharedRoom?: boolean;
+}
+
+/** One team's channel as running: the ladder's narrowed by the team's own. */
+export interface CaseAlertTeamChannel {
+  team: string;
+  channel: string;
+  /** The team's own saved channel, when it has one. */
+  teamChannel?: string;
+  /** Whether the team has a chat room of its own. */
+  room: boolean;
+}
+
+export interface CaseAlertLadderChannels {
+  /** The ladder runs: its own switch and the file's master switch are on. */
+  enabled: boolean;
+  channel: string;
+  teams: CaseAlertTeamChannel[];
 }
 
 /** What decides whether a ladder pages and what it may cost: read here, set
@@ -596,4 +644,72 @@ export interface CaseAlertFileOnly {
   "safety.callWithoutVerifiedLeads"?: boolean;
   "safety.callHeadsWithoutLowerTiers"?: boolean;
   "phones.source"?: string;
+  /** Whether a stopped chain replies in its thread. */
+  ackChat?: boolean;
+  /** CRE: one email per step. The lists are counted or flagged, never sent. */
+  "email.enabled"?: boolean;
+  "email.teamLists"?: number;
+  "email.creTeamList"?: boolean;
+  "email.csTeamList"?: boolean;
+  /** CRE: true when the file replaces the built-in rule table. */
+  "rules.custom"?: boolean;
+  /** CRE: minutes after the case is created that each step (L0 to L4) is
+   *  called, by severity (S0 to S4). From the code, not the file. */
+  timing?: Partial<Record<string, number[][]>>;
 }
+
+/** A rotation's reminder window: "HH:MM" on the 24-hour clock of an IANA zone. */
+export type ReminderWindow = { start: string; end: string; timeZone: string };
+
+/**
+ * What a group's rota reminder emails may be changed to: whether the weekday
+ * and weekend reminders and the calendar invitations go out, how many people a
+ * weekend rotation needs each day before the weekend is announced, the hours of
+ * the rotations kept on a fixed clock, and who is copied on every reminder.
+ * Keyed by rotation code; a code this form does not show is kept as saved.
+ */
+export type SaveRotaReminderSettings = {
+  weekdayEnabled: boolean;
+  weekendEnabled: boolean;
+  invitesEnabled: boolean;
+  weekendRequired: Record<string, number>;
+  windows: Record<string, ReminderWindow>;
+  copyTo: string[];
+};
+
+/** The saved settings of one group, with who last changed them. */
+export type RotaReminderSettings = SaveRotaReminderSettings & {
+  family: RotaFamily;
+  updatedBy: string;
+  updatedOn: string;
+};
+
+/** Which reminder is asked for: the next working day's, or the weekend's. */
+export type RotaReminderKind = "weekday" | "weekend";
+
+/** Where a request is: waiting for the scheduled task, being sent, or done. */
+export type RotaReminderStatus = "QUEUED" | "SENDING" | "SENT" | "FAILED";
+
+/**
+ * One ask to send a group's rota reminders now, picked up by the scheduled task.
+ * `test` is true for a test copy, which goes only to the person who asked.
+ */
+export type RotaReminderRequest = {
+  id: string;
+  family: RotaFamily;
+  kind: RotaReminderKind;
+  test: boolean;
+  status: RotaReminderStatus;
+  requestedBy: string;
+  requestedOn: string;
+  claimedOn?: string;
+  handledOn?: string;
+  result?: string;
+};
+
+/**
+ * What is posted to ask for a reminder now. With `test` the reminder goes only
+ * to the person asking (marked "[Test copy]"), never to the rota, and is not
+ * recorded as a real reminder.
+ */
+export type SendRotaReminder = { kind: RotaReminderKind; test: boolean };

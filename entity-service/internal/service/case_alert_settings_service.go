@@ -43,10 +43,10 @@ import (
 // Who may do what:
 //
 //	see the settings     a CSM admin (AUTH_ADMIN_ROLES), a portal admin, the
-//	                     CRE or SRE rota admin, the CRE or CS head
-//	change a ladder's    a CSM admin or portal admin: both ladders; the CRE
-//	rooms, routes and    rota admin: CRE; the SRE rota admin: SRE
-//	values
+//	                     CRE, SRE or SME rota admin, the CRE or CS head
+//	change a ladder's    a CSM admin, portal admin or CS head: all three;
+//	rooms, routes and    the CRE rota admin or CRE head: CRE; the SRE rota
+//	values               admin: SRE; the SME rota admin: SME
 //	read the opened URLs csm-notification-service's client only
 //	                     (CASE_ALERTS_RUNTIME_CLIENT_IDS), never a person
 type CaseAlertSettingsService interface {
@@ -177,17 +177,18 @@ func (s *caseAlertSettingsService) whoIsAsking(ctx context.Context) (caseAlertCa
 		return caseAlertCaller{}, err
 	}
 	a := authorityOf(who)
-	// Each family's settings are its own: the CRE rota admin and the CRE and
-	// CS heads have CRE's, the SRE rota admin SRE's, the SME rota admin SME's.
-	// Seeing a family's settings and changing them go together; another
-	// family's are never sent. A CSM or portal admin has all three.
+	// Each family's settings are its own: the CRE rota admin and the CRE head
+	// have CRE's, the SRE rota admin SRE's, the SME rota admin SME's. The CS
+	// head sits above all three families and has all three. Seeing a family's
+	// settings and changing them go together; another family's are never
+	// sent. A CSM or portal admin has all three.
 	switch {
 	case a.portalAdmin:
 		c.ladder[familyCRE], c.ladder[familySRE], c.ladder[familySME] = true, true, true
 	default:
 		c.ladder[familyCRE] = a.creRotaAdmin || a.head
-		c.ladder[familySRE] = a.sreRotaAdmin
-		c.ladder[familySME] = a.smeRotaAdmin
+		c.ladder[familySRE] = a.sreRotaAdmin || a.csHead
+		c.ladder[familySME] = a.smeRotaAdmin || a.csHead
 	}
 	c.view = len(c.roomLadders()) > 0
 	return c, nil
@@ -196,7 +197,11 @@ func (s *caseAlertSettingsService) whoIsAsking(ctx context.Context) (caseAlertCa
 // mayChange refuses a change to ladder's settings the caller may not make.
 func (c caseAlertCaller) mayChange(ladder string) error {
 	if !c.ladder[ladder] {
-		return &apierror.ForbiddenError{Msg: fmt.Sprintf("only a CSM admin, a portal admin or the %s rota admin can change the %s alert settings", ladder, ladder)}
+		who := fmt.Sprintf("the %s rota admin or the CS head", ladder)
+		if ladder == familyCRE {
+			who = "the CRE rota admin, the CRE head or the CS head"
+		}
+		return &apierror.ForbiddenError{Msg: fmt.Sprintf("only a CSM admin, a portal admin, %s can change the %s alert settings", who, ladder)}
 	}
 	return nil
 }
@@ -290,17 +295,33 @@ func (s *caseAlertSettingsService) Get(ctx context.Context) (domain.CaseAlertSet
 		return domain.CaseAlertSettings{}, err
 	}
 	if c.ladder[familySRE] {
-		out.UnmappedGroups = unmappedSREGroups(out.RouteOptions, routes)
+		routed := reportedSRERouting(out.Running)
+		if routed == nil {
+			routed = map[string]bool{}
+		}
+		// A group with a room of its own has its cards in that room, not the
+		// shared SRE room.
+		for _, r := range rooms {
+			if r.Ladder == familySRE && r.GroupID != "" && r.Enabled && r.HasSecret {
+				routed["id:"+r.GroupID] = true
+			}
+		}
+		out.UnmappedGroups = unmappedSREGroups(out.RouteOptions, routes, routed)
 	}
 	return out, nil
 }
 
 // unmappedSREGroups are the assignment groups whose incidents no SRE route
-// sends to a team or rota, and that no Team Schedule team is named as (the
-// alert service matches a group named as a team key or name without a
-// route): their cards go to the shared SRE room until a route is saved.
-func unmappedSREGroups(opts *domain.CaseAlertRouteOptions, routes []repository.CaseAlertRouteRow) []domain.CaseAlertAssignmentGroup {
+// sends to a team or rota, that no Team Schedule team is named as (the alert
+// service matches a group named as a team key or name without a route), and
+// that the alert service does not already route from its own file (routed:
+// its reported aliases and default groups): their cards go to the shared SRE
+// room until a route is saved.
+func unmappedSREGroups(opts *domain.CaseAlertRouteOptions, routes []repository.CaseAlertRouteRow, routed map[string]bool) []domain.CaseAlertAssignmentGroup {
 	covered := map[string]bool{}
+	for g := range routed {
+		covered[g] = true
+	}
 	for _, r := range routes {
 		if r.Ladder == familySRE && r.Enabled {
 			covered[r.GroupName] = true
@@ -345,7 +366,7 @@ func (s *caseAlertSettingsService) routeOptions(ctx context.Context) (*domain.Ca
 		AssignmentGroups: []domain.CaseAlertAssignmentGroup{},
 	}
 	for _, g := range assignment {
-		out.AssignmentGroups = append(out.AssignmentGroups, domain.CaseAlertAssignmentGroup{ID: g.ID, Name: g.Name})
+		out.AssignmentGroups = append(out.AssignmentGroups, domain.CaseAlertAssignmentGroup{ID: g.ID, Name: g.Name, Services: g.Services})
 	}
 	for _, g := range groups {
 		out.Groups = append(out.Groups, domain.CaseAlertTeamOption{Key: g.Key, Name: g.Name, Family: g.Family})
@@ -383,6 +404,8 @@ func runningView(ctx context.Context, rev repository.CaseAlertRevisionRow, mine 
 		Running *struct {
 			Ladders  map[string]map[string]domain.CaseAlertRunningValue `json:"ladders"`
 			FileOnly map[string]map[string]json.RawMessage              `json:"fileOnly"`
+			Channels map[string]json.RawMessage                         `json:"channels"`
+			Groups   map[string]json.RawMessage                         `json:"groups"`
 		} `json:"running"`
 	}
 	if err := json.Unmarshal(rev.AppliedSummary, &summary); err != nil {
@@ -407,6 +430,47 @@ func runningView(ctx context.Context, rev repository.CaseAlertRevisionRow, mine 
 			out.FileOnly[l] = v
 		}
 	}
+	for l, v := range summary.Running.Channels {
+		if mine[l] {
+			if out.Channels == nil {
+				out.Channels = map[string]json.RawMessage{}
+			}
+			out.Channels[l] = v
+		}
+	}
+	for l, v := range summary.Running.Groups {
+		if mine[l] {
+			if out.Groups == nil {
+				out.Groups = map[string]json.RawMessage{}
+			}
+			out.Groups[l] = v
+		}
+	}
+	return out
+}
+
+// reportedSRERouting is the SRE assignment groups the alert service already
+// sends to a team, or to the default rota, without a route saved here: its
+// file's aliases and default groups, as it last reported them. Nil when it
+// has not reported them.
+func reportedSRERouting(r *domain.CaseAlertRunning) map[string]bool {
+	if r == nil || len(r.Groups[familySRE]) == 0 {
+		return nil
+	}
+	var g struct {
+		Aliases       map[string]string `json:"aliases"`
+		DefaultGroups []string          `json:"defaultGroups"`
+	}
+	if json.Unmarshal(r.Groups[familySRE], &g) != nil {
+		return nil
+	}
+	out := map[string]bool{}
+	for group := range g.Aliases {
+		out[strings.ToLower(strings.TrimSpace(group))] = true
+	}
+	for _, group := range g.DefaultGroups {
+		out[strings.ToLower(strings.TrimSpace(group))] = true
+	}
 	return out
 }
 
@@ -420,8 +484,8 @@ func revisionView(r repository.CaseAlertRevisionRow) domain.CaseAlertRevision {
 
 func roomView(r repository.CaseAlertRoomRow) domain.CaseAlertChatRoom {
 	v := domain.CaseAlertChatRoom{
-		ID: r.ID, Ladder: r.Ladder, TeamKey: r.TeamKey, Label: r.Label, Enabled: r.Enabled, Teamless: r.Teamless,
-		Channel: r.Channel, HasWebhook: r.HasSecret, WebhookSetAt: r.WebhookSetAt, LastTestAt: r.LastTestAt,
+		ID: r.ID, Ladder: r.Ladder, TeamKey: r.TeamKey, GroupID: r.GroupID, GroupName: r.GroupName, Label: r.Label,
+		Enabled: r.Enabled, Teamless: r.Teamless, Channel: r.Channel, HasWebhook: r.HasSecret, WebhookSetAt: r.WebhookSetAt, LastTestAt: r.LastTestAt,
 		UpdatedBy: r.UpdatedBy, UpdatedOn: r.UpdatedOn,
 	}
 	if r.HasSecret && r.WebhookHint != nil {
@@ -457,10 +521,20 @@ func (s *caseAlertSettingsService) SaveRoom(ctx context.Context, req domain.Save
 		return domain.CaseAlertChatRoom{}, err
 	}
 	label := strings.TrimSpace(req.Label)
+	groupID := strings.ToLower(strings.TrimSpace(req.GroupID))
+	if groupID != "" {
+		g, err := s.roomGroup(ctx, ladder, groupID, req)
+		if err != nil {
+			return domain.CaseAlertChatRoom{}, err
+		}
+		if label == "" {
+			label = g.Name
+		}
+	}
 	if label == "" || len(label) > maxCaseAlertLabel {
 		return domain.CaseAlertChatRoom{}, &apierror.ValidationError{Msg: fmt.Sprintf("label must be 1 to %d characters", maxCaseAlertLabel)}
 	}
-	w := repository.CaseAlertRoomWrite{Ladder: ladder, TeamKey: strings.ToLower(strings.TrimSpace(req.TeamKey)), Label: label, Enabled: true}
+	w := repository.CaseAlertRoomWrite{Ladder: ladder, TeamKey: strings.ToLower(strings.TrimSpace(req.TeamKey)), GroupID: groupID, Label: label, Enabled: true}
 	if req.Enabled != nil {
 		w.Enabled = *req.Enabled
 	}
@@ -494,6 +568,8 @@ func (s *caseAlertSettingsService) SaveRoom(ctx context.Context, req domain.Save
 		if !ok || family != ladder {
 			return domain.CaseAlertChatRoom{}, &apierror.ValidationError{Msg: fmt.Sprintf("teamKey must be an %s team of the Team Schedule", ladder)}
 		}
+	} else if w.GroupID != "" {
+		// Checked by roomGroup: an SRE assignment group, nothing but its URL.
 	} else if w.Teamless {
 		return domain.CaseAlertChatRoom{}, &apierror.ValidationError{Msg: "teamless is for a team's room; the shared room is not one"}
 	} else if w.Channel != "" {
@@ -504,6 +580,33 @@ func (s *caseAlertSettingsService) SaveRoom(ctx context.Context, req domain.Save
 		return domain.CaseAlertChatRoom{}, err
 	}
 	return roomView(row), nil
+}
+
+// roomGroup is the assignment group a group's room is saved for: the SRE
+// ladder only, one of the support groups the tab offers (supportGroupSetSQL),
+// and nothing but a URL -- no team, teamless flag or channel (0244). The
+// group's calls still follow its route; only its chat space is the room's.
+func (s *caseAlertSettingsService) roomGroup(ctx context.Context, ladder, groupID string, req domain.SaveCaseAlertRoomRequest) (repository.CaseAlertGroupRow, error) {
+	if ladder != familySRE {
+		return repository.CaseAlertGroupRow{}, &apierror.ValidationError{Msg: "only the SRE ladder has a room per assignment group"}
+	}
+	if strings.TrimSpace(req.TeamKey) != "" {
+		return repository.CaseAlertGroupRow{}, &apierror.ValidationError{Msg: "send groupId or teamKey, not both"}
+	}
+	if (req.Teamless != nil && *req.Teamless) || (req.Channel != nil && strings.TrimSpace(*req.Channel) != "") {
+		return repository.CaseAlertGroupRow{}, &apierror.ValidationError{Msg: "teamless and channel are for team rooms; a group's room has only its URL"}
+	}
+	if err := validateUUIDs("groupId", []string{groupID}); err != nil {
+		return repository.CaseAlertGroupRow{}, err
+	}
+	g, ok, err := s.repo.AssignmentGroupByID(ctx, groupID)
+	if err != nil {
+		return repository.CaseAlertGroupRow{}, err
+	}
+	if !ok || g.Name == "" {
+		return repository.CaseAlertGroupRow{}, &apierror.ValidationError{Msg: "groupId is not an assignment group"}
+	}
+	return g, nil
 }
 
 // room is a room the caller may change, by id.
@@ -906,8 +1009,13 @@ func (s *caseAlertSettingsService) Runtime(ctx context.Context) (domain.CaseAler
 		if webhook == "" && r.Channel == "" {
 			continue
 		}
+		if r.GroupID != "" && (webhook == "" || r.GroupName == "") {
+			// A group's room is only its URL, matched by the group's name.
+			continue
+		}
 		out.Rooms = append(out.Rooms, domain.CaseAlertRuntimeRoom{
-			Ladder: r.Ladder, TeamKey: r.TeamKey, Label: r.Label, Teamless: r.Teamless, WebhookURL: webhook, Channel: r.Channel,
+			Ladder: r.Ladder, TeamKey: r.TeamKey, GroupID: r.GroupID, GroupName: r.GroupName, Label: r.Label,
+			Teamless: r.Teamless, WebhookURL: webhook, Channel: r.Channel,
 		})
 	}
 	routes, err := s.repo.ListRoutes(ctx)

@@ -16,174 +16,262 @@
  * under the License.
  */
 
-import { useId, useRef, useState, type FormEvent, type JSX, type RefObject } from "react";
+import { useId, useRef, useState, type FormEvent, type JSX, type ReactNode, type RefObject } from "react";
 import { familyOfLadder } from "../utils/caseAlertChainSettings";
-import { useCaseAlertDrafts } from "../utils/caseAlertDrafts";
+import { useCaseAlertDrafts, type DraftChange } from "../utils/caseAlertDrafts";
 import type {
   CaseAlertFileOnly,
+  CaseAlertLadderChannels,
   CaseAlertRoomLadder,
   CaseAlertLadderValue,
   CaseAlertRunningValue,
   CaseAlertSettings as Settings,
 } from "../types";
 import {
-  LADDER_KEY_GROUPS,
+  ADVANCED_GROUPS,
+  CRE_STEP_LABELS,
+  channelWords,
+  creTimingRows,
   draftFor,
   fileOnlyRows,
   formatLadderValue,
+  ladderKeysByName,
   ladderKeysFor,
   limitHint,
   parseDraft,
   sameLadderValue,
   type LadderDraft,
+  type LadderKeyGroup,
   type LadderKeySpec,
 } from "../utils/caseAlertLadderKeys";
 import CaseAlertModal from "./CaseAlertModal";
-import CaseAlertSection from "./CaseAlertSection";
 
 function when(iso: string | undefined): string {
   return iso ? new Date(iso).toLocaleString() : "";
 }
 
-/** Where "In use" comes from, in one line. */
-function runningLine(s: Settings): string {
-  const r = s.running;
-  if (!r) {
-    return "The alert service hasn't reported what it uses yet. It does when it starts in shadow or db mode.";
-  }
-  const base = `"In use" is what the alert service reported at ${when(r.reportedAt)}, in ${r.mode} mode.`;
-  return r.mode === "shadow"
-    ? `${base} In shadow mode it still uses its file; saved values take over in db mode.`
-    : base;
+/** The saved keys of a ladder this page doesn't know. */
+function unknownSaved(s: Settings, ladder: CaseAlertRoomLadder): CaseAlertLadderValue[] {
+  const known = new Set(ladderKeysFor(ladder).map((k) => k.key));
+  return s.values.filter((v) => v.ladder === ladder && !known.has(v.key));
 }
 
-interface Props {
+interface GroupProps {
   ladder: CaseAlertRoomLadder;
   settings: Settings;
+  group: LadderKeyGroup;
+  /** Shown above the table, e.g. the ladder's name when a family has two. */
+  heading?: string;
   /** Says what was saved, for the settings' confirmation line. */
   onSaved: (what: string) => void;
 }
 
 /**
- * The rest of a ladder's paging file, key by key: who gets alerts, when a
- * ladder starts, how it climbs, the heads and the chat messages. Each row
- * shows the value the alert service runs with and where it came from, and,
- * when one is saved here that isn't in use yet, the saved one. A saved value
- * replaces that one key of the file; going back to the file's removes it.
- *
- * The ladder's groups sit in one section, each group in its own, all closed
- * until opened (CaseAlertSection); the file's own settings come last, closed
- * too. Changes are made in a dialog from the row's Edit. Who may change a
- * ladder's values is who may change its rooms (canManage.roomLadders);
- * everyone else who may see the section reads it.
+ * One group of a ladder's paging file, key by key. Each row shows the value
+ * the alert service runs with and where it came from, and, when one is saved
+ * here that isn't in use yet, the saved one. A saved value replaces that one
+ * key of the file; going back to the file's removes it. Changes are made in a
+ * dialog from the row's Edit. Who may change a ladder's values is who may
+ * change its rooms (canManage.roomLadders); everyone else reads it. Nothing
+ * when the ladder has no key in the group.
  */
-export default function CaseAlertLadderSettings({ ladder, settings: s, onSaved }: Props): JSX.Element {
+export function LadderValueGroup({ ladder, settings: s, group, heading, onSaved }: GroupProps): JSX.Element | null {
+  return (
+    <ValueRows
+      ladder={ladder}
+      settings={s}
+      rows={ladderKeysFor(ladder).filter((k) => k.group === group)}
+      heading={heading}
+      onSaved={onSaved}
+    />
+  );
+}
+
+interface KeysProps extends Omit<GroupProps, "group"> {
+  /** The keys to show, in this order. */
+  keys: readonly string[];
+}
+
+/** A ladder's values for these keys, in one table, as LadderValueGroup shows a
+ *  group's. */
+export function LadderValueKeys({ ladder, settings: s, keys, heading, onSaved }: KeysProps): JSX.Element | null {
+  return (
+    <ValueRows ladder={ladder} settings={s} rows={ladderKeysByName(ladder, keys)} heading={heading} onSaved={onSaved} />
+  );
+}
+
+function ValueRows({
+  ladder,
+  settings: s,
+  rows,
+  heading,
+  onSaved,
+}: Omit<GroupProps, "group"> & { rows: LadderKeySpec[] }): JSX.Element | null {
+  if (rows.length === 0) return null;
   const canEdit = s.canManage.roomLadders.includes(ladder);
-  const specs = ladderKeysFor(ladder);
-  const saved = s.values.filter((v) => v.ladder === ladder);
+  const running = s.running?.ladders[ladder] ?? {};
+  return (
+    <div className="cas-block">
+      {heading ? <h5>{heading}</h5> : null}
+      <ValueTable canEdit={canEdit}>
+        {rows.map((spec) => (
+          <ValueRow
+            key={spec.key}
+            ladder={ladder}
+            spec={spec}
+            saved={s.values.find((v) => v.ladder === ladder && v.key === spec.key)}
+            running={running[spec.key]}
+            reported={Boolean(s.running)}
+            canEdit={canEdit}
+            onSaved={onSaved}
+          />
+        ))}
+      </ValueTable>
+    </div>
+  );
+}
+
+interface AdvancedProps {
+  ladder: CaseAlertRoomLadder;
+  settings: Settings;
+  /** The ladder's step of copying the file's values here, when it has one. */
+  setup?: ReactNode;
+  onSaved: (what: string) => void;
+}
+
+/**
+ * The rest of a ladder, under the family's Advanced: copying the file's values
+ * here, when a ladder starts, how it climbs, the heads, the chat messages, any
+ * saved key this page doesn't know, who gets which channel as running, and
+ * what only the file sets.
+ */
+export function LadderAdvanced({ ladder, settings: s, setup, onSaved }: AdvancedProps): JSX.Element {
+  const canEdit = s.canManage.roomLadders.includes(ladder);
   const running = s.running?.ladders[ladder] ?? {};
   // A saved key this page doesn't know is still shown, so nothing saved is
   // hidden, and can be taken back to the file's.
-  const known = new Set(specs.map((k) => k.key));
-  const others = saved.filter((v) => !known.has(v.key));
-
-  const rowProps = (spec: LadderKeySpec) => ({
-    ladder,
-    spec,
-    saved: saved.find((v) => v.key === spec.key),
-    running: running[spec.key],
-    reported: Boolean(s.running),
-    canEdit,
-    onSaved,
-  });
-
-  const savedWords = (n: number) => (n > 0 ? `${n} saved here` : "all from the file");
-
+  const others = unknownSaved(s, ladder);
   return (
-    <div className="cas-ladder">
-      <CaseAlertSection
-        id={`${ladder}.ladder`}
-        label={`${ladder} ladder settings`}
-        summary={`${ladder} ladder settings · ${savedWords(saved.length)}`}
-      >
-        {ladder === "SRE" ? (
-          <p className="cas-status">One SRE ladder: these apply to both the SaaS and IaaS chains.</p>
-        ) : null}
-        <p className="cas-sub cas-running">{runningLine(s)}</p>
+    <div className="cas-ladder" role="group" aria-label={`${ladder} ladder`}>
+      <h4>{ladder} ladder</h4>
+      {setup}
+      {ADVANCED_GROUPS.map((group) => (
+        <LadderValueGroup key={group} ladder={ladder} settings={s} group={group} heading={group} onSaved={onSaved} />
+      ))}
+      {others.length > 0 ? (
+        <div className="cas-block">
+          <h5>Other saved settings</h5>
+          <ValueTable canEdit={canEdit}>
+            {others.map((v) => (
+              <ValueRow
+                key={v.id}
+                ladder={ladder}
+                spec={{
+                  key: v.key,
+                  ladders: [ladder],
+                  group: "How it climbs",
+                  label: v.key,
+                  help: "Not a setting this page knows. Go back to the file's value to remove it.",
+                  editor: "text",
+                }}
+                saved={v}
+                running={running[v.key]}
+                reported={Boolean(s.running)}
+                canEdit={canEdit}
+                unknown
+                onSaved={onSaved}
+              />
+            ))}
+          </ValueTable>
+        </div>
+      ) : null}
+      <ChannelsGroup ladder={ladder} channels={s.running?.channels?.[ladder]} />
+      <FileOnlyGroup
+        ladder={ladder}
+        fileOnly={s.running?.fileOnly?.[ladder]}
+        onTab={new Set(Object.keys(running))}
+        aliases={ladder === "CRE" ? s.running?.groups?.CRE?.aliases : undefined}
+      />
+    </div>
+  );
+}
 
-        {LADDER_KEY_GROUPS.map((group) => {
-          const rows = specs.filter((k) => k.group === group);
-          if (rows.length === 0) return null;
-          const savedHere = rows.filter((k) => saved.some((v) => v.key === k.key)).length;
-          return (
-            <CaseAlertSection
-              key={group}
-              id={`${ladder}.ladder.${group}`}
-              label={group}
-              summary={`${group} · ${savedWords(savedHere)}`}
-            >
-              <ValueTable canEdit={canEdit}>
-                {rows.map((spec) => (
-                  <ValueRow key={spec.key} {...rowProps(spec)} />
-                ))}
-              </ValueTable>
-            </CaseAlertSection>
-          );
-        })}
-
-        {others.length > 0 ? (
-          <CaseAlertSection
-            id={`${ladder}.ladder.other`}
-            label="Other saved settings"
-            summary={`Other saved settings · ${others.length} saved here`}
-          >
-            <ValueTable canEdit={canEdit}>
-              {others.map((v) => (
-                <ValueRow
-                  key={v.id}
-                  ladder={ladder}
-                  spec={{
-                    key: v.key,
-                    ladders: [ladder],
-                    group: "How it climbs",
-                    label: v.key,
-                    help: "Not a setting this page knows. Go back to the file's value to remove it.",
-                    editor: "text",
-                  }}
-                  saved={v}
-                  running={running[v.key]}
-                  reported={Boolean(s.running)}
-                  canEdit={canEdit}
-                  unknown
-                  onSaved={onSaved}
-                />
-              ))}
-            </ValueTable>
-          </CaseAlertSection>
-        ) : null}
-      </CaseAlertSection>
-
-      <FileOnlyGroup ladder={ladder} fileOnly={s.running?.fileOnly?.[ladder]} />
+/** Who gets which channel, as the alert service runs it now: whether the
+ *  ladder runs, its channel, and each team's (the ladder's narrowed by the
+ *  team's own). Read-only: the ladder's switches are edited under On/off and
+ *  channel, a team's channel and room under Where alerts go. */
+function ChannelsGroup({
+  ladder,
+  channels,
+}: {
+  ladder: CaseAlertRoomLadder;
+  channels?: CaseAlertLadderChannels;
+}): JSX.Element | null {
+  if (!channels) return null;
+  return (
+    <div className="cas-block" role="group" aria-label={`${ladder}: who gets which channel`}>
+      <h5>Who gets which channel</h5>
+      <p className="cas-sub">
+        {channels.enabled
+          ? `The ${ladder} ladder is on: ${channelWords(channels.channel) ?? channels.channel}.`
+          : `The ${ladder} ladder is off: nobody is alerted.`}{" "}
+        A team's own channel can only narrow the ladder's.
+      </p>
+      {channels.teams.length > 0 ? (
+        <table className="ra-tbl cas-values cas-channels">
+          <thead>
+            <tr>
+              <th>Team</th>
+              <th>Channel in use</th>
+              <th>Own room</th>
+            </tr>
+          </thead>
+          <tbody>
+            {channels.teams.map((t) => (
+              <tr key={t.team}>
+                <td>
+                  <b>{t.team}</b>
+                </td>
+                <td>
+                  <span className="cas-val">
+                    {channels.enabled ? (channelWords(t.channel) ?? t.channel) : "Off"}
+                    {t.teamChannel ? " (team's own)" : ""}
+                  </span>
+                </td>
+                <td>{t.room ? "Yes" : "No (shared room)"}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      ) : (
+        <p className="cas-sub cas-empty">Every team uses the ladder's channel.</p>
+      )}
     </div>
   );
 }
 
 /** The settings only the alert service's file can set, read-only for
- *  everyone and closed until opened: whether alerts run and what they may
- *  cost stay a reviewed change to the file, not a click. */
+ *  everyone. Whether a ladder runs and its channel are edited under On/off
+ *  and channel, and its call limits under Advanced, once the alert service
+ *  reports them; the rest stay a reviewed change to the file. */
 function FileOnlyGroup({
   ladder,
   fileOnly,
+  onTab,
+  aliases,
 }: {
   ladder: CaseAlertRoomLadder;
   fileOnly?: CaseAlertFileOnly;
+  onTab: ReadonlySet<string>;
+  /** CRE: case team names the file maps to a team key. */
+  aliases?: Record<string, string>;
 }): JSX.Element {
-  // Named by ladder: the SRE tab shows SRE's and SME's.
-  const title = `${ladder}: set in the alert service's file`;
+  const aliasRows = Object.entries(aliases ?? {}).sort(([a], [b]) => a.localeCompare(b));
   return (
-    <CaseAlertSection id={`${ladder}.file`} label={title} summary={`${title} · read-only`}>
+    <div className="cas-block" role="group" aria-label={`${ladder}: set in the alert service's file`}>
+      <h5>Set in the alert service&apos;s file (read-only)</h5>
       <p className="cas-sub">
-        These decide whether alerts run and what it may cost. They change only with a reviewed change to the file.
+        These decide what alerts may cost. They change only with a reviewed change to the file.
       </p>
       {fileOnly ? (
         <table className="ra-tbl cas-values cas-file-only">
@@ -198,7 +286,7 @@ function FileOnlyGroup({
             </tr>
           </thead>
           <tbody>
-            {fileOnlyRows(ladder, fileOnly).map((r) => (
+            {fileOnlyRows(ladder, fileOnly, onTab).map((r) => (
               <tr key={r.label}>
                 <td>
                   <b>{r.label}</b>
@@ -215,7 +303,82 @@ function FileOnlyGroup({
           Not reported yet: the alert service reports these when it runs in shadow or db mode.
         </p>
       )}
-    </CaseAlertSection>
+      {ladder === "CRE" ? <CreTimingTable fileOnly={fileOnly} /> : null}
+      {aliasRows.length > 0 ? (
+        <>
+          <h5>Team names mapped in the file</h5>
+          <p className="cas-sub">A case whose team name is on the left is routed as the team on the right.</p>
+          <table className="ra-tbl cas-values cas-aliases" aria-label="CRE: team names mapped in the file">
+            <thead>
+              <tr>
+                <th>Case team name</th>
+                <th>Routed as team</th>
+              </tr>
+            </thead>
+            <tbody>
+              {aliasRows.map(([from, to]) => (
+                <tr key={from}>
+                  <td>{from}</td>
+                  <td>
+                    <span className="cas-val">{to}</span>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </>
+      ) : null}
+    </div>
+  );
+}
+
+/** When each CRE step is called, per severity, as the alert service reports
+ *  it (minutes after the case is created). Nothing until it has reported. */
+export function CreTimingTable({
+  fileOnly,
+  heading = "When each step is called",
+}: {
+  fileOnly?: CaseAlertFileOnly;
+  heading?: string;
+}): JSX.Element | null {
+  const timing = creTimingRows(fileOnly?.timing);
+  if (timing.length === 0) return null;
+  return (
+    <>
+      {heading ? <h5>{heading}</h5> : null}
+      <p className="cas-sub">
+        Minutes after the case is created. Each number is one call to that step&apos;s people; the chain moves up only
+        while nobody has acknowledged. Set in the code: a change needs a release.
+      </p>
+      <table className="ra-tbl cas-values cas-timing" aria-label="CRE: when each step is called">
+        <thead>
+          <tr>
+            <th>Severity</th>
+            {CRE_STEP_LABELS.map((l) => (
+              <th key={l}>{l}</th>
+            ))}
+            <th>Chain ends</th>
+          </tr>
+        </thead>
+        <tbody>
+          {timing.map((row) => (
+            <tr key={row.severity}>
+              <td>
+                <b>{row.severity}</b>
+              </td>
+              {row.steps.map((v, i) => (
+                <td key={CRE_STEP_LABELS[i]}>
+                  <span className="cas-val">{v}</span>
+                </td>
+              ))}
+              <td>
+                <span className="cas-val">{row.ends}</span>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </>
   );
 }
 
@@ -267,8 +430,31 @@ function ValueRow({
 }: ValueRowProps): JSX.Element {
   const [editing, setEditing] = useState(false);
   const editRef = useRef<HTMLButtonElement>(null);
+  const drafts = useCaseAlertDrafts();
+  const family = familyOfLadder(ladder);
   // The saved value, while it isn't the one the alert service runs with.
   const pending = saved && !(running && sameLadderValue(spec, saved.value, running.value));
+  // A yes or no is a switch, a pick from a few a dropdown, right in the row;
+  // the rest open a dialog. Either way the change waits for Submit.
+  const inline = canEdit && !unknown && (spec.editor === "bool" || spec.editor === "enum");
+  const queued = drafts.changes.find(
+    (c): c is Extract<DraftChange, { kind: "values" }> =>
+      c.kind === "values" && c.input.ladder === ladder && spec.key in c.input.values,
+  );
+  const current = queued ? queued.input.values[spec.key] : saved ? saved.value : running?.value;
+  // Going back to the file's value is queued: say so, and don't offer it twice.
+  const resetQueued = Boolean(saved && drafts.changes.some((c) => c.kind === "deleteValue" && c.valueId === saved.id));
+  const change = (value: unknown) => {
+    const what = `${ladder} ${spec.label}`;
+    drafts.add({ family, what, kind: "values", input: { ladder, values: { [spec.key]: value } } });
+    onSaved(what);
+  };
+  const useFile = () => {
+    if (!saved) return;
+    const what = `${ladder} ${spec.label} uses the file's value again`;
+    drafts.add({ family, what, kind: "deleteValue", valueId: saved.id });
+    onSaved(what);
+  };
 
   return (
     <tr>
@@ -277,7 +463,55 @@ function ValueRow({
         <div className="cas-sub">{spec.help}</div>
       </td>
       <td>
-        {running ? (
+        {inline ? (
+          <span className="cas-inline">
+            {spec.editor === "bool" ? (
+              <button
+                type="button"
+                role="switch"
+                aria-checked={current === true}
+                aria-label={spec.label}
+                className={`switch${current === true ? " on" : ""}`}
+                disabled={drafts.submitting === family}
+                onClick={() => change(current !== true)}
+              >
+                <span className="tr" aria-hidden="true" />
+                {current === true ? "On" : "Off"}
+              </button>
+            ) : (
+              <select
+                className="cas-select"
+                aria-label={spec.label}
+                value={typeof current === "string" ? current : ""}
+                disabled={drafts.submitting === family}
+                onChange={(e) => change(e.target.value)}
+              >
+                {typeof current === "string" ? null : <option value="">Not reported yet</option>}
+                {(spec.options ?? []).map((o) => (
+                  <option key={o.value} value={o.value}>
+                    {o.label}
+                  </option>
+                ))}
+              </select>
+            )}
+            {queued ? (
+              <span className="cas-chip cas-src-pending">waits for Submit</span>
+            ) : resetQueued ? (
+              <span className="cas-chip cas-src-pending">file&apos;s value on Submit</span>
+            ) : pending && running ? (
+              // The control shows the saved value; say what still runs.
+              <span className={`cas-chip cas-src-${running.source}`}>
+                In use: {formatLadderValue(spec, running.value)}
+              </span>
+            ) : running ? (
+              <span className={`cas-chip cas-src-${running.source}`}>
+                {running.source === "file" ? "from the file" : "saved here"}
+              </span>
+            ) : reported ? null : (
+              <span className="cas-chip">not reported yet</span>
+            )}
+          </span>
+        ) : running ? (
           <>
             <span className="cas-val">{formatLadderValue(spec, running.value)}</span>
             <span className={`cas-chip cas-src-${running.source}`}>
@@ -292,11 +526,21 @@ function ValueRow({
         )}
         {pending ? (
           <div className="cas-sub cas-saved" title={`Saved by ${saved.updatedBy} at ${when(saved.updatedOn)}`}>
-            Saved: {formatLadderValue(spec, saved.value)} · used after the alert service restarts
+            Saved: {formatLadderValue(spec, saved.value)} · not in use yet
           </div>
         ) : null}
       </td>
-      {canEdit ? (
+      {canEdit && inline ? (
+        <td>
+          {saved && !resetQueued ? (
+            <div className="cas-acts">
+              <button type="button" className="btn sm" onClick={useFile} aria-label={`${spec.label}: use the file's value`}>
+                Use file&apos;s value
+              </button>
+            </div>
+          ) : null}
+        </td>
+      ) : canEdit ? (
         <td>
           <div className="cas-acts">
             <button ref={editRef} type="button" className="btn sm" onClick={() => setEditing(true)}>

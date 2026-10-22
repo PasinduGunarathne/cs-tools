@@ -39,10 +39,19 @@ export const CHAIN_LADDER: Partial<Record<PagingChainCode, CaseAlertLadder>> = {
  * for the inputs.
  */
 
-export type LadderKeyGroup = "Who gets alerts" | "When a ladder starts" | "How it climbs" | "Heads" | "Chat messages";
+export type LadderKeyGroup =
+  | "On/off and channel"
+  | "Who gets alerts"
+  | "Call limits"
+  | "When a ladder starts"
+  | "How it climbs"
+  | "Heads"
+  | "Chat messages";
 
 export const LADDER_KEY_GROUPS: LadderKeyGroup[] = [
+  "On/off and channel",
   "Who gets alerts",
+  "Call limits",
   "When a ladder starts",
   "How it climbs",
   "Heads",
@@ -89,7 +98,62 @@ const ALL: CaseAlertRoomLadder[] = ["CRE", "SRE", "SME"];
 const SRE_SME: CaseAlertRoomLadder[] = ["SRE", "SME"];
 const SME: CaseAlertRoomLadder[] = ["SME"];
 
+/** The channels a ladder can use, most to least. */
+const CHANNEL_OPTIONS = [
+  { value: "both", label: "Calls and chat" },
+  { value: "chat", label: "Chat only" },
+  { value: "call", label: "Calls only" },
+  { value: "log", label: "Log only (no calls or chat)" },
+];
+
 export const LADDER_KEYS: LadderKeySpec[] = [
+  // On/off and channel: a switch and a channel, nothing else. The alert
+  // service's file keeps a master switch and an emergency off switch outside
+  // this page. The call limits that sat here are under Advanced.
+  {
+    key: "enabled",
+    ladders: ALL,
+    group: "On/off and channel",
+    label: "Alerts on",
+    help: "Whether this ladder pages anyone at all. The alert service's own master switch must be on too.",
+    editor: "bool",
+  },
+  {
+    key: "channel",
+    ladders: ALL,
+    group: "On/off and channel",
+    label: "Channel",
+    help: "How people are reached. Calls cost money and wake people; chat only posts cards. A team's own channel can only narrow this.",
+    editor: "enum",
+    options: CHANNEL_OPTIONS,
+  },
+  {
+    key: "safety.maxCallsPerLadder",
+    ladders: BOTH,
+    group: "Call limits",
+    label: "Max calls per ladder",
+    help: "The most calls one incident or case may place. Extra calls are dropped and noted.",
+    editor: "int",
+    min: 1,
+    max: 50,
+  },
+  {
+    key: "safety.callWithoutVerifiedLeads",
+    ladders: BOTH,
+    group: "Call limits",
+    label: "Call before every lead has a number",
+    help: "Off, no calls are placed while any ABT lead has no phone number. On, calls go out anyway.",
+    editor: "bool",
+  },
+  {
+    key: "safety.callHeadsWithoutLowerTiers",
+    ladders: BOTH,
+    group: "Call limits",
+    label: "Call the heads when nobody below can be called",
+    help: "Off, the top steps are held when nobody on the lower steps has a number. On, they are called anyway.",
+    editor: "bool",
+  },
+
   // Who is paged
   {
     key: "teams.abtType",
@@ -572,22 +636,68 @@ function yesNo(v: boolean | undefined): string {
   return v === undefined ? "—" : v ? "Yes" : "No";
 }
 
+/** The CRE rung emails in words: off, or on with how many team lists and
+ *  whether the CRE and CS lists are set. The addresses never reach the page. */
+function rungEmailWords(f: CaseAlertFileOnly): string {
+  const on = f["email.enabled"];
+  if (on === undefined) return "—";
+  if (!on) return "Off";
+  const lists = f["email.teamLists"] ?? 0;
+  const parts = [
+    `${lists} team ${lists === 1 ? "list" : "lists"}`,
+    `CRE list ${f["email.creTeamList"] ? "set" : "not set"}`,
+    `CS list ${f["email.csTeamList"] ? "set" : "not set"}`,
+  ];
+  return `On (${parts.join(", ")})`;
+}
+
+/** The CRE chain's steps, in the order the timing table lists them. */
+export const CRE_STEP_LABELS = ["L0", "L1", "L2", "L3", "L4"] as const;
+
+/** The severities the timing table lists, most urgent first. */
+export const CRE_TIMING_SEVERITIES = ["S0", "S1", "S2", "S3", "S4"] as const;
+
+/** One row of the CRE timing table: the severity, each step's call minutes
+ *  in words ("+1, +2, +3"; "—" for a step with no calls), and when the chain
+ *  ends. Severities the alert service did not report are left out. */
+export function creTimingRows(
+  timing: CaseAlertFileOnly["timing"],
+): { severity: string; steps: string[]; ends: string }[] {
+  if (!timing) return [];
+  return CRE_TIMING_SEVERITIES.filter((s) => Array.isArray(timing[s])).map((severity) => {
+    const steps = timing[severity] ?? [];
+    const words = CRE_STEP_LABELS.map((_, i) => {
+      const calls = steps[i] ?? [];
+      return calls.length === 0 ? "—" : calls.map((m) => `+${m}`).join(", ");
+    });
+    const all = steps.flat();
+    return { severity, steps: words, ends: all.length === 0 ? "—" : `+${Math.max(...all)} min` };
+  });
+}
+
 /** The settings only the file can set, as rows for people. The heads row is
  *  CRE's only: SRE has no heads. Allowed numbers are a count; the numbers
  *  never reach the page. */
-export function fileOnlyRows(ladder: CaseAlertRoomLadder, f: CaseAlertFileOnly): { label: string; value: string }[] {
+export function fileOnlyRows(
+  ladder: CaseAlertRoomLadder,
+  f: CaseAlertFileOnly,
+  /** Keys reported among the ladder's tab values: shown there, not here. */
+  onTab: ReadonlySet<string> = new Set(),
+): { label: string; value: string }[] {
   const maxCalls = f["safety.maxCallsPerLadder"];
   const maxLevel = f["safety.maxLevel"];
   const allowed = f["safety.allowedNumbers"];
-  const rows = [
-    { label: "Alerts on", value: yesNo(f.enabled) },
-    { label: "Channel", value: channelWords(f.channel) ?? "—" },
+  const rows: { key: string; label: string; value: string }[] = [
+    { key: "enabled", label: "Alerts on", value: yesNo(f.enabled) },
+    { key: "channel", label: "Channel", value: channelWords(f.channel) ?? "—" },
     {
+      key: "safety.maxCallsPerLadder",
       label: "Max calls per ladder",
       value: maxCalls === undefined ? "—" : maxCalls === 0 ? "no cap" : String(maxCalls),
     },
-    { label: "Highest step", value: maxLevel === undefined ? "no cap" : `L${maxLevel}` },
+    { key: "safety.maxLevel", label: "Highest step", value: maxLevel === undefined ? "no cap" : `L${maxLevel}` },
     {
+      key: "safety.allowedNumbers",
       label: "Allowed numbers",
       value:
         allowed === undefined
@@ -596,17 +706,34 @@ export function fileOnlyRows(ladder: CaseAlertRoomLadder, f: CaseAlertFileOnly):
             ? "any number"
             : `only ${allowed} listed ${allowed === 1 ? "number" : "numbers"}`,
     },
-    { label: "Call before every lead has a number", value: yesNo(f["safety.callWithoutVerifiedLeads"]) },
+    {
+      key: "safety.callWithoutVerifiedLeads",
+      label: "Call before every lead has a number",
+      value: yesNo(f["safety.callWithoutVerifiedLeads"]),
+    },
   ];
   if (ladder === "CRE") {
     rows.push({
+      key: "safety.callHeadsWithoutLowerTiers",
       label: "Call the heads when nobody below can be called",
       value: yesNo(f["safety.callHeadsWithoutLowerTiers"]),
     });
   }
   const phones = f["phones.source"];
-  rows.push({ label: "Phone numbers from", value: phones ? (PHONE_WORDS[phones] ?? phones) : "—" });
-  return rows.map((r) => ({ ...r, value: safe(r.value) }));
+  rows.push({ key: "phones.source", label: "Phone numbers from", value: phones ? (PHONE_WORDS[phones] ?? phones) : "—" });
+  rows.push({ key: "ackChat", label: "Reply in the thread when a chain stops", value: yesNo(f.ackChat) });
+  if (ladder === "CRE") {
+    rows.push({ key: "email.enabled", label: "Email per step", value: rungEmailWords(f) });
+    const custom = f["rules.custom"];
+    rows.push({
+      key: "rules.custom",
+      label: "Who each step calls",
+      value: custom === undefined ? "—" : custom ? "The file's own rule table" : "Built-in rules (Case Paging Rules sheet)",
+    });
+  }
+  return rows
+    .filter((r) => !onTab.has(r.key))
+    .map(({ label, value }) => ({ label, value: safe(value) }));
 }
 
 /** The limits of a key, in one line, for the editor. Hints only: the server
@@ -645,4 +772,71 @@ function canonical(v: unknown): string {
 export function sameLadderValue(spec: LadderKeySpec | undefined, a: unknown, b: unknown): boolean {
   if (spec?.editor === "head") return canonical(headOf(a)) === canonical(headOf(b));
   return canonical(a) === canonical(b);
+}
+
+/** Where "In use" comes from, in one line. */
+export function runningLine(s: CaseAlertSettings): string {
+  const r = s.running;
+  if (!r) {
+    return "The alert service hasn't reported what it uses yet. It does when it starts in shadow or db mode.";
+  }
+  // The server leaves reportedAt out when it has no time for the report.
+  const at = r.reportedAt ? ` at ${new Date(r.reportedAt).toLocaleString()}` : "";
+  const base = `"In use" is what the alert service reported${at}, in ${r.mode} mode.`;
+  return r.mode === "shadow"
+    ? `${base} In shadow mode it still uses its file; saved values take over in db mode.`
+    : base;
+}
+
+/** The ladder groups under Advanced: the rest of the paging file, after the
+ *  switches and who gets alerts. */
+export const ADVANCED_GROUPS: LadderKeyGroup[] = LADDER_KEY_GROUPS.filter(
+  (g) => g !== "On/off and channel" && g !== "Who gets alerts",
+);
+
+/** How many of a ladder's values in these groups are saved here. */
+export function savedInGroups(
+  s: CaseAlertSettings,
+  ladder: CaseAlertRoomLadder,
+  groups: readonly LadderKeyGroup[],
+): number {
+  const keys = new Set(ladderKeysFor(ladder).filter((k) => groups.includes(k.group)).map((k) => k.key));
+  return s.values.filter((v) => v.ladder === ladder && keys.has(v.key)).length;
+}
+
+/** The settings the Alert Settings tab shows for each ladder, in this order:
+ *  the switch, the channel, which priorities start a chain, the call limits,
+ *  then SRE's and SME's time between steps. CRE's heads are not shown: left
+ *  empty, the alert service finds them in the leadership team. Every other key
+ *  stays in LADDER_KEYS and keeps its value (the file's, or one saved
+ *  earlier); the tab just doesn't offer it. */
+export const SHOWN_KEYS: Record<CaseAlertRoomLadder, readonly string[]> = {
+  CRE: [
+    "enabled",
+    "channel",
+    "trigger.priorities",
+    "safety.maxCallsPerLadder",
+    "safety.callWithoutVerifiedLeads",
+  ],
+  SRE: [
+    "enabled",
+    "channel",
+    "trigger.priorities",
+    "safety.maxCallsPerLadder",
+    "safety.callWithoutVerifiedLeads",
+    "timing.interval",
+  ],
+  SME: ["enabled", "channel", "timing.interval"],
+};
+
+/** The specs of these keys on a ladder, in the order given. */
+export function ladderKeysByName(ladder: CaseAlertRoomLadder, keys: readonly string[]): LadderKeySpec[] {
+  const specs = ladderKeysFor(ladder);
+  return keys.flatMap((k) => specs.filter((s) => s.key === k));
+}
+
+/** How many of a ladder's saved values are for keys the page doesn't show. */
+export function savedOutside(s: CaseAlertSettings, ladder: CaseAlertRoomLadder, shown: readonly string[]): number {
+  const keys = new Set(shown);
+  return s.values.filter((v) => v.ladder === ladder && !keys.has(v.key)).length;
 }
