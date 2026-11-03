@@ -212,6 +212,14 @@ type CommentAddedPayload struct {
 	// at all, which csm-notification-service's own slaEngine needs to tell
 	// apart from a real negative.
 	IsSupportEngineerResponse bool `json:"isSupportEngineerResponse"`
+	// SupportEngineerUnknown is true when IsSupportEngineerResponse could not
+	// be decided (CSEngineerRole unset, or the author or role lookup failed),
+	// so its false is not a confirmed "not an engineer". Absent when it was.
+	SupportEngineerUnknown bool `json:"supportEngineerUnknown,omitempty"`
+	// CreatedOn is when this comment was published (RFC 3339, UTC), so a
+	// consumer can tell a comment written before a case.severity_changed from
+	// one written after it when the two arrive out of order.
+	CreatedOn string `json:"createdOn,omitempty"`
 	// CaseType/EngagementType let csm-notification-service route a
 	// frustration-detection Chat alert to the Migration audience instead of
 	// the usual team/Incident Monitor routing, when the comment landed on a
@@ -364,6 +372,9 @@ type SeverityChangedPayload struct {
 	SRETeamID   string   `json:"sreTeamId,omitempty"`
 	SRETeamName string   `json:"sreTeamName,omitempty"`
 	Recipients  []string `json:"recipients"`
+	// ChangedAt is when the severity changed (RFC 3339, UTC): it tells a
+	// replay of this change from a later change with the same severities.
+	ChangedAt string `json:"changedAt,omitempty"`
 }
 
 // CaseCreatedPayload is the Payload shape for TypeCaseCreated — mirrors

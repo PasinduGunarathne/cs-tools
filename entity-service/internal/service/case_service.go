@@ -1448,9 +1448,11 @@ func (s *caseService) createCaseCommentAs(ctx context.Context, req domain.Create
 	// least one of them is actually configured, so a deployment with
 	// neither the native SLA engine nor Event Hub publishing enabled pays
 	// no extra lookup on every comment.
-	var isSupportEngineerResponse bool
+	var isSupportEngineerResponse, supportEngineerUnknown bool
 	if req.Type == domain.CommentTypeComment && (s.slaEngine != nil || s.publisher != nil) {
-		isSupportEngineerResponse = s.isSupportEngineerAuthor(ctx, req.CaseID, actorEmail)
+		var known bool
+		isSupportEngineerResponse, known = s.supportEngineerAuthor(ctx, req.CaseID, actorEmail)
+		supportEngineerUnknown = !known
 	}
 
 	// Best-effort, in-process only -- deliberately not gated on s.publisher
@@ -1473,7 +1475,7 @@ func (s *caseService) createCaseCommentAs(ctx context.Context, req domain.Create
 			slog.ErrorContext(ctx, "create comment: enrich case for case.comment_added publish failed", "caseId", req.CaseID)
 		} else {
 			cv.WatchList = s.filterActiveWatchListUsers(ctx, cv, cv.WatchList)
-			publishCommentAddedEvent(ctx, s.publisher, s.AccountDefaultWatcherEmails, s.ProjectOnboardingInfo, cv, req, c.ID, authorName, actorEmail, isSupportEngineerResponse)
+			publishCommentAddedEvent(ctx, s.publisher, s.AccountDefaultWatcherEmails, s.ProjectOnboardingInfo, cv, req, c.ID, authorName, actorEmail, isSupportEngineerResponse, supportEngineerUnknown)
 		}
 	}
 
@@ -1601,19 +1603,27 @@ func (s *caseService) subscribeCommenterToWatchList(ctx context.Context, caseID,
 // has none -- see that method's own doc comment), or a failed role lookup
 // all answer false -- can't confirm, not an error.
 func (s *caseService) isSupportEngineerAuthor(ctx context.Context, caseID, actorEmail string) bool {
+	yes, _ := s.supportEngineerAuthor(ctx, caseID, actorEmail)
+	return yes
+}
+
+// supportEngineerAuthor is isSupportEngineerAuthor that also says whether the
+// answer was confirmed: known is false when it could not be checked (no role
+// configured, the author not found, or the role lookup failed).
+func (s *caseService) supportEngineerAuthor(ctx context.Context, caseID, actorEmail string) (yes, known bool) {
 	if s.csEngineerRole == "" {
-		return false
+		return false, false
 	}
 	user, err := s.userRepo.GetUserByEmail(ctx, actorEmail)
 	if err != nil {
-		return false
+		return false, false
 	}
 	roles, err := s.userRepo.GetUserRoles(ctx, user.ID)
 	if err != nil {
 		slog.ErrorContext(ctx, "create comment: support-engineer role lookup failed", "caseId", caseID)
-		return false
+		return false, false
 	}
-	return slices.Contains(roles, s.csEngineerRole)
+	return slices.Contains(roles, s.csEngineerRole), true
 }
 
 // applyCustomerReplyStateTransition moves a case-like record back to

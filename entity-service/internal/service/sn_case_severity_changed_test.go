@@ -19,6 +19,7 @@ package service
 import (
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/domain"
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/events"
@@ -97,6 +98,9 @@ func TestSNCaseService_UpdateCase_PublishesSeverityChanged(t *testing.T) {
 	}
 	if payload.Product != "WSO2 API Manager" {
 		t.Errorf("product = %q, want %q", payload.Product, "WSO2 API Manager")
+	}
+	if _, err := time.Parse(time.RFC3339Nano, payload.ChangedAt); err != nil {
+		t.Errorf("changedAt = %q, want an RFC 3339 instant: %v", payload.ChangedAt, err)
 	}
 	if payload.Team != "Team Nova" {
 		t.Errorf("team = %q, want %q", payload.Team, "Team Nova")

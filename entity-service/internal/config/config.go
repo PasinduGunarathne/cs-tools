@@ -1052,6 +1052,9 @@ func Load() *Config {
 		slog.Warn("CSM_PORTAL_BACKEND_CLIENT_ID is also listed in M2M_CLIENT_IDS; CSMPortalBackendClientID is still checked before M2MClientIDs and still requires a matching user-email domain, so this has no effect on access, but the M2M_CLIENT_IDS entry is almost certainly a copy-paste mistake",
 			"clientId", cfg.CSMPortalBackendClientID)
 	}
+	if cfg.CSEngineerRole == "" {
+		slog.Warn("CS_ENGINEER_ROLE is not set: no case comment can be confirmed as a support engineer's, so case.comment_added marks every author supportEngineerUnknown")
+	}
 	// Set outside the literal so its longer key does not realign every field above.
 	cfg.CSMMigrationSalesforceOpportunityIngestEnabled = envFlagOn("CSM_MIGRATION_SALESFORCE_OPPORTUNITY_INGEST_ENABLED")
 	cfg.CSMMigrationSalesforceProjectIngestEnabled = envFlagOn("CSM_MIGRATION_SALESFORCE_PROJECT_INGEST_ENABLED")

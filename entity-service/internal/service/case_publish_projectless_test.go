@@ -42,7 +42,7 @@ func TestPublishCommentAddedEvent_ProjectlessCaseSkipsPublish(t *testing.T) {
 	cv := projectlessCase()
 	req := domain.CreateCaseCommentRequest{CaseID: cv.ID, Type: domain.CommentTypeComment, Content: "hi"}
 
-	publishCommentAddedEvent(context.Background(), pub, nil, nil, cv, req, "c1", "Engineer", "engineer@wso2.com", true)
+	publishCommentAddedEvent(context.Background(), pub, nil, nil, cv, req, "c1", "Engineer", "engineer@wso2.com", true, false)
 
 	if len(pub.calls) != 0 {
 		t.Fatalf("published %v for a case with no project, want nothing", publishedTypes(pub.calls))

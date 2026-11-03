@@ -1518,6 +1518,16 @@ service's own `CLAUDE.md`, `dispatch.subjectLine`).
   Chat-only path the way `case.acknowledged` does; a severity change with
   no watchers has nobody to notify by design.
 
+- **Case Alerts fields on `case.severity_changed` / `case.comment_added`.**
+  `changedAt` and `createdOn` (RFC 3339, UTC, the publish time) and
+  `supportEngineerUnknown` (true when `isSupportEngineerResponse` could not be
+  decided: `CS_ENGINEER_ROLE` unset, or the author or role lookup failed,
+  from `supportEngineerAuthor` / `supportEngineerAuthorSN`). They let
+  csm-notification-service ignore a redelivered old comment or severity change
+  and not treat an unchecked role as "not an engineer". Startup logs a warning
+  when `CS_ENGINEER_ROLE` is unset. csm-notification-service decodes strictly:
+  deploy it first.
+
 `caseProductName(cv)` (a small shared helper) resolves
 `cv.DeployedProductDetails.Product.Name` (e.g. `"WSO2 API Manager"`, `""`
 when the case has no deployed product) — used by `publishCaseCreated`,

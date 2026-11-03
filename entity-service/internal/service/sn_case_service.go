@@ -1491,8 +1491,13 @@ func (s *snCaseService) publishCommentAdded(ctx context.Context, req domain.Crea
 		slog.InfoContext(ctx, "sn create comment: case.comment_added not published, could not resolve comment author's display name", "caseId", req.CaseID)
 		return
 	}
-	isSupportEngineerResponse := req.Type == domain.CommentTypeComment && s.isSupportEngineerAuthorSN(ctx, req.CaseID, author.Email)
-	publishCommentAddedEvent(ctx, s.publisher, s.AccountDefaultWatcherEmails, s.ProjectOnboardingInfo, cv, req, commentID, author.Name, author.Email, isSupportEngineerResponse)
+	var isSupportEngineerResponse, supportEngineerUnknown bool
+	if req.Type == domain.CommentTypeComment {
+		var known bool
+		isSupportEngineerResponse, known = s.supportEngineerAuthorSN(ctx, req.CaseID, author.Email)
+		supportEngineerUnknown = !known
+	}
+	publishCommentAddedEvent(ctx, s.publisher, s.AccountDefaultWatcherEmails, s.ProjectOnboardingInfo, cv, req, commentID, author.Name, author.Email, isSupportEngineerResponse, supportEngineerUnknown)
 }
 
 // publishCommentAddedEvent is publishCommentAdded's actual body, factored
@@ -1511,8 +1516,9 @@ func (s *snCaseService) publishCommentAdded(ctx context.Context, req domain.Crea
 // is likewise resolved by each caller (isSupportEngineerAuthorSN here,
 // caseService.isSupportEngineerAuthor on the Postgres side) rather than
 // looked up here, since "is this author a support engineer" is answered via
-// a different mechanism on each data source.
-func publishCommentAddedEvent(ctx context.Context, publisher EventPublisherService, resolveAccountDefaultWatcherEmails func(context.Context, string) ([]string, error), resolveProjectOnboardingInfo func(context.Context, string) (string, bool, error), cv domain.CaseView, req domain.CreateCaseCommentRequest, commentID, authorName, authorEmail string, isSupportEngineerResponse bool) {
+// a different mechanism on each data source. supportEngineerUnknown says that
+// check could not be made, so a false is not a confirmed "not an engineer".
+func publishCommentAddedEvent(ctx context.Context, publisher EventPublisherService, resolveAccountDefaultWatcherEmails func(context.Context, string) ([]string, error), resolveProjectOnboardingInfo func(context.Context, string) (string, bool, error), cv domain.CaseView, req domain.CreateCaseCommentRequest, commentID, authorName, authorEmail string, isSupportEngineerResponse, supportEngineerUnknown bool) {
 	if publisher == nil {
 		return
 	}
@@ -1573,6 +1579,8 @@ func publishCommentAddedEvent(ctx context.Context, publisher EventPublisherServi
 		IsEvaluationAccount:       isEvaluationAccount,
 		ProjectOnboardingStatus:   onboardingStatus,
 		IsSupportEngineerResponse: isSupportEngineerResponse,
+		SupportEngineerUnknown:    supportEngineerUnknown,
+		CreatedOn:                 time.Now().UTC().Format(time.RFC3339Nano),
 		CaseType:                  strings.ToUpper(derefString(cv.Type)),
 		EngagementType:            derefString(cv.EngagementType),
 	})
@@ -1677,8 +1685,16 @@ func (s *snCaseService) applyResponseSLAOnComment(ctx context.Context, req domai
 // s.csEngineerRole being "" (unconfigured), an empty authorEmail, or a
 // failed role lookup all answer false — can't confirm, not an error.
 func (s *snCaseService) isSupportEngineerAuthorSN(ctx context.Context, caseID, authorEmail string) bool {
+	yes, _ := s.supportEngineerAuthorSN(ctx, caseID, authorEmail)
+	return yes
+}
+
+// supportEngineerAuthorSN is isSupportEngineerAuthorSN that also says whether
+// the answer was confirmed: known is false when it could not be checked (no
+// role configured, no email, the lookup failed or found no user).
+func (s *snCaseService) supportEngineerAuthorSN(ctx context.Context, caseID, authorEmail string) (yes, known bool) {
 	if s.csEngineerRole == "" || authorEmail == "" {
-		return false
+		return false, false
 	}
 	usersResp, err := s.userSvc.SearchUsers(ctx, domain.SearchUsersRequest{
 		Pagination: domain.Pagination{Limit: 1},
@@ -1686,14 +1702,17 @@ func (s *snCaseService) isSupportEngineerAuthorSN(ctx context.Context, caseID, a
 	})
 	if err != nil {
 		slog.ErrorContext(ctx, "sn create comment: support-engineer role lookup failed", "caseId", caseID)
-		return false
+		return false, false
+	}
+	if len(usersResp.Users) == 0 {
+		return false, false
 	}
 	for _, u := range usersResp.Users {
 		if slices.Contains(u.Roles, s.csEngineerRole) {
-			return true
+			return true, true
 		}
 	}
-	return false
+	return false, true
 }
 
 // applyCaseStateSLAEffects best-effort applies the CSM-native SLA engine's
@@ -2027,6 +2046,7 @@ func publishSeverityChangedEvent(ctx context.Context, publisher EventPublisherSe
 		SRETeamID:   sreTeamID,
 		SRETeamName: sreTeamName,
 		Recipients:  recipients,
+		ChangedAt:   time.Now().UTC().Format(time.RFC3339Nano),
 	})
 	if err != nil {
 		slog.ErrorContext(ctx, "update case: encode case.severity_changed payload failed", "caseId", caseID, "error", err)
